@@ -53,13 +53,15 @@ impl AudioReader {
         let decoder = if params.codec == CODEC_ID_OPUS {
             // OpusHead is little-endian. MP4's dOps, which symphonia passes on
             // behind an "OpusHead" prefix, is big-endian with version 0.
-            let skip = match params.extra_data.as_deref().and_then(|head| head.get(8..12)) {
-                Some(&[0, _, hi, lo]) => u16::from_be_bytes([hi, lo]),
-                Some(&[_, _, lo, hi]) => u16::from_le_bytes([lo, hi]),
-                _ => 0,
+            let head = params.extra_data.as_deref().unwrap_or_default();
+            let field = |at: usize| {
+                let bytes = [*head.get(at)?, *head.get(at + 1)?];
+                Some(if head.get(8) == Some(&0) { u16::from_be_bytes(bytes) } else { u16::from_le_bytes(bytes) })
             };
-            let dec =
+            let (skip, output_gain) = (field(10).unwrap_or(0), field(16).unwrap_or(0) as i16);
+            let mut dec =
                 opusic_c::Decoder::new(channels, opusic_c::SampleRate::Hz48000).map_err(|e| Error::Unsupported(e.message()))?;
+            dec.set_gain(output_gain.into()).map_err(|e| Error::Unsupported(e.message()))?;
             Decoder::Opus { dec, skip: skip.into() }
         } else {
             Decoder::Symphonia(symphonia::default::get_codecs().make_audio_decoder(params, &Default::default())?)
