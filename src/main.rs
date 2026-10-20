@@ -30,7 +30,7 @@ mod flags {
             required -b,--bitrate kbps: u32
             /// Integrated loudness target in LUFS [default: -16]
             optional -l,--loudness lufs: f64
-            /// True-peak ceiling in dBTP; the gain is reduced to respect it [default: -2]
+            /// True-peak ceiling in dBTP, checked on the source; encoding can overshoot it by about 1 dB [default: -2]
             optional -p,--true-peak dbtp: f64
             /// Skip loudness normalization
             optional -N,--no-normalize

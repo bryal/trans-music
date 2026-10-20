@@ -22,7 +22,8 @@ bitrate (required), loudness target, true-peak ceiling, thread count, `--prune`,
 2. Decode again, apply one constant gain that lands on the target
    (default -16 LUFS). If that would push the true peak above the ceiling
    (default -2 dBTP) the gain is reduced instead, and a warning is printed.
-   There is no dynamic processing.
+   The ceiling is checked on the source, so Opus encoding can overshoot it
+   by about 1 dB. There is no dynamic processing.
 3. Resample to 48 kHz if needed (`rubato`), encode with libopus
    (VBR, complexity 10, music signal hint), mux into Ogg.
 4. Copy tags. FLAC and Ogg sources keep their Vorbis comments verbatim;
