@@ -1,5 +1,6 @@
 //! Walk the source library and decide which files need work.
 
+use std::cmp::Reverse;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
@@ -87,7 +88,7 @@ fn walk(root: &Path, follow_links: bool, skip: Option<&Path>) -> io::Result<Vec<
         }
         let mut entries = fs::read_dir(&dir)?.collect::<io::Result<Vec<_>>>()?;
         // Reversed, so the stack pops subdirectories in sorted order.
-        entries.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+        entries.sort_by_key(|e| Reverse(e.file_name()));
         for entry in entries {
             let rel = rel_dir.join(entry.file_name());
             let kind = entry.file_type()?;
