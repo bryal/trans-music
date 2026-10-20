@@ -1,5 +1,5 @@
-//! Decode any supported audio file to interleaved f32 via symphonia.
-//! Opus input is handled by registering `opuscule` as a symphonia decoder.
+//! Decode any supported audio file to interleaved f32 via symphonia, with
+//! libopus registered as its Opus decoder.
 
 use std::fs::File;
 use std::path::Path;
@@ -48,11 +48,7 @@ impl AudioReader {
     pub fn open(path: &Path) -> Result<Self> {
         let file = File::open(path)?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
-        let mut hint = Hint::new();
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            hint.with_extension(ext);
-        }
-        let format = PROBE.probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())?;
+        let format = PROBE.probe(&Hint::new(), mss, FormatOptions::default(), MetadataOptions::default())?;
         let track = format
             .default_track(TrackType::Audio)
             .ok_or(Error::Unsupported("no audio track"))?;
@@ -70,7 +66,6 @@ impl AudioReader {
         let decoder = CODECS.make_audio_decoder(params, &AudioDecoderOptions::default())?;
         Ok(Self { track_id: track.id, format, decoder, rate, channels, chunk: Vec::new() })
     }
-
 
     /// The next decoded chunk, or `None` at end of stream.
     pub fn next_chunk(&mut self) -> Result<Option<&[f32]>> {
@@ -110,9 +105,8 @@ struct OpusDecoder {
     params: AudioCodecParameters,
     pcm: Vec<f32>,
     buf: AudioBuffer<f32>,
-    /// Encoder delay from OpusHead. The Ogg demuxer trims end padding but
-    /// leaves pre-skip to the decoder.
-    pre_skip: usize,
+    /// Pre-skip frames from OpusHead still to drop. The Ogg demuxer trims
+    /// end padding but leaves pre-skip to the decoder.
     skip: usize,
 }
 
@@ -127,7 +121,7 @@ impl RegisterableAudioDecoder for OpusDecoder {
         let inner = opusic_c::Decoder::new(layout, opusic_c::SampleRate::Hz48000)
             .map_err(|_| Error::Unsupported("opus: decoder init failed"))?;
         let buf = AudioBuffer::new(AudioSpec::new(48_000, channels), MAX_FRAMES);
-        let pre_skip = match params.extra_data.as_deref() {
+        let skip = match params.extra_data.as_deref() {
             Some(head) if head.len() >= 12 && head.starts_with(b"OpusHead") => {
                 u16::from_le_bytes([head[10], head[11]]) as usize
             }
@@ -138,8 +132,7 @@ impl RegisterableAudioDecoder for OpusDecoder {
             params: params.clone(),
             pcm: vec![0.0; MAX_FRAMES * n],
             buf,
-            pre_skip,
-            skip: pre_skip,
+            skip,
         }))
     }
 
@@ -151,7 +144,6 @@ impl RegisterableAudioDecoder for OpusDecoder {
 impl AudioDecoder for OpusDecoder {
     fn reset(&mut self) {
         let _ = self.inner.get_mut().unwrap().reset();
-        self.skip = self.pre_skip;
     }
 
     fn codec_info(&self) -> &CodecInfo {
@@ -173,9 +165,9 @@ impl AudioDecoder for OpusDecoder {
         self.buf.render_uninit(Some(frames));
         let n = self.buf.spec().channels().count();
         self.buf.copy_from_slice_interleaved(&&self.pcm[..frames * n]);
-        let start = packet.trim_start.get() as usize + self.skip.min(frames);
-        self.skip -= self.skip.min(frames);
-        self.buf.trim(start.min(frames), packet.trim_end.get() as usize);
+        let skip = self.skip.min(frames);
+        self.skip -= skip;
+        self.buf.trim(packet.trim_start.get() as usize + skip, packet.trim_end.get() as usize);
         Ok(self.buf.as_generic_audio_buffer_ref())
     }
 
