@@ -2,18 +2,21 @@
 
 use std::fs::{self, File};
 use std::io::BufWriter;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::decode::AudioReader;
 use crate::encode::{self, OggOpusWriter, RATE};
 use crate::loudness::{self, Gain};
 use crate::resample::Resampler;
-use crate::scan::Job;
 use lofty::ogg::tag::VorbisComments;
 
 pub type Result<T> = encode::Result<T>;
 
 pub struct Settings {
+    /// Library root; jobs are paths relative to it.
+    pub src: PathBuf,
+    /// Mirror root, see [`Settings::output`].
+    pub dst: PathBuf,
     pub bitrate_kbps: u32,
     pub normalize: bool,
     pub loudness_lufs: f64,
@@ -21,19 +24,27 @@ pub struct Settings {
     pub keep_art: bool,
 }
 
-/// Transcodes one file, printing warnings to stderr.
-pub fn transcode(job: &Job, settings: &Settings) -> Result<()> {
-    let (src, dst) = (&job.src, &job.dst);
-    let mut reader = AudioReader::open(src)?;
-    let tags = encode::read_tags(src, settings.keep_art).unwrap_or_else(|e| {
-        eprintln!("warning: {}: tags not copied: {e}", job.rel.display());
+impl Settings {
+    /// Where the transcode of `job` goes.
+    pub fn output(&self, job: &Path) -> PathBuf {
+        self.dst.join(job.with_extension("opus"))
+    }
+}
+
+/// Transcodes `job`, printing warnings to stderr.
+pub fn transcode(job: &Path, settings: &Settings) -> Result<()> {
+    let src = settings.src.join(job);
+    let dst = settings.output(job);
+    let mut reader = AudioReader::open(&src)?;
+    let tags = encode::read_tags(&src, settings.keep_art).unwrap_or_else(|e| {
+        eprintln!("warning: {}: tags not copied: {e}", job.display());
         Default::default()
     });
     let mut linear = 1.0;
     if settings.normalize {
-        let gain = measure(src, settings)?;
+        let gain = measure(&src, settings)?;
         if gain.limited {
-            eprintln!("warning: {}: gain capped at {:+.1} dB by the true-peak ceiling", job.rel.display(), gain.db);
+            eprintln!("warning: {}: gain capped at {:+.1} dB by the true-peak ceiling", job.display(), gain.db);
         }
         linear = gain.linear();
     }
@@ -44,7 +55,7 @@ pub fn transcode(job: &Job, settings: &Settings) -> Result<()> {
     // Write next to the destination, rename when complete, so an interrupted
     // run never leaves a truncated file that looks up to date.
     let tmp = dst.with_extension("opus.part");
-    let result = encode_into(&tmp, &mut reader, linear, tags, settings).and_then(|()| Ok(fs::rename(&tmp, dst)?));
+    let result = encode_into(&tmp, &mut reader, linear, tags, settings).and_then(|()| Ok(fs::rename(&tmp, &dst)?));
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
     }
@@ -117,14 +128,21 @@ mod tests {
     fn wav_round_trip() {
         let dir = std::env::temp_dir().join(format!("trans-music-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        let job = Job { rel: "tone.wav".into(), src: dir.join("tone.wav"), dst: dir.join("out").join("tone.opus") };
+        let settings = Settings {
+            src: dir.clone(),
+            dst: dir.join("out"),
+            bitrate_kbps: 96,
+            normalize: true,
+            loudness_lufs: -16.0,
+            true_peak_dbtp: -2.0,
+            keep_art: true,
+        };
+        let job = Path::new("tone.wav");
         let frames_in = 44_100 * 3 + 123;
-        write_wav(&job.src, 44_100, 2, frames_in);
-        let settings =
-            Settings { bitrate_kbps: 96, normalize: true, loudness_lufs: -16.0, true_peak_dbtp: -2.0, keep_art: true };
-        transcode(&job, &settings).unwrap();
+        write_wav(&dir.join(job), 44_100, 2, frames_in);
+        transcode(job, &settings).unwrap();
 
-        let mut reader = AudioReader::open(&job.dst).unwrap();
+        let mut reader = AudioReader::open(&settings.output(job)).unwrap();
         assert_eq!((reader.rate, reader.channels as usize), (RATE, 2));
         let mut meter = loudness::meter(2, RATE).unwrap();
         let mut out = Vec::new();

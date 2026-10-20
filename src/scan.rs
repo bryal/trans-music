@@ -5,31 +5,27 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::transcode::Settings;
+
 /// Extensions (lower case, without dot) treated as audio input.
 pub const AUDIO_EXTS: &[&str] = &["flac", "m4a", "mp4", "mp3", "ogg", "oga", "opus", "wav", "wave", "aac", "alac", "mka"];
 
-/// One source file and where its transcode goes.
-pub struct Job {
-    /// Path relative to the library root, shown in progress output.
-    pub rel: PathBuf,
-    pub src: PathBuf,
-    pub dst: PathBuf,
-}
-
+/// Each audio file under `src` is a job, named by its path relative to `src`.
 pub struct Plan {
     /// Every extension seen under `src`.
     pub all_exts: BTreeSet<String>,
-    /// Audio files whose output is up to date.
-    pub skipped: Vec<Job>,
-    pub todo: Vec<Job>,
-    /// Files under `dst` with no corresponding source file.
+    /// Jobs whose output is up to date.
+    pub skipped: Vec<PathBuf>,
+    pub todo: Vec<PathBuf>,
+    /// Files under `dst` that are no job's output.
     pub orphans: Vec<PathBuf>,
-    /// Sources skipped because an earlier source maps to the same output,
-    /// e.g. `x.flac` next to `x.mp3`.
-    pub conflicts: Vec<Job>,
+    /// Jobs left out because an earlier job has the same output, e.g.
+    /// `x.flac` next to `x.mp3`.
+    pub conflicts: Vec<PathBuf>,
 }
 
-pub fn plan(src_root: &Path, dst_root: &Path, force: bool) -> io::Result<Plan> {
+pub fn plan(settings: &Settings, force: bool) -> io::Result<Plan> {
+    let (src_root, dst_root) = (&settings.src, &settings.dst);
     let src_canon = fs::canonicalize(src_root)?;
     let dst_canon = fs::canonicalize(dst_root).ok();
     let mut all_exts = BTreeSet::new();
@@ -40,17 +36,16 @@ pub fn plan(src_root: &Path, dst_root: &Path, force: bool) -> io::Result<Plan> {
 
     // Each walk skips the other root: a DST inside SRC is not read as input,
     // and a SRC inside DST is not pruned.
-    for rel in walk(src_root, true, dst_canon.as_deref())? {
-        let ext = rel.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    for job in walk(src_root, true, dst_canon.as_deref())? {
+        let ext = job.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
         all_exts.insert(ext.clone());
         if !AUDIO_EXTS.contains(&ext.as_str()) {
             continue;
         }
-        let dst = dst_root.join(rel.with_extension("opus"));
-        let job = Job { src: src_root.join(&rel), dst, rel };
-        if !expected.insert(job.dst.clone()) {
+        let dst = settings.output(&job);
+        if !expected.insert(dst.clone()) {
             conflicts.push(job);
-        } else if force || needs_transcode(&job) {
+        } else if force || needs_transcode(&src_root.join(&job), &dst) {
             todo.push(job);
         } else {
             skipped.push(job);
@@ -68,11 +63,11 @@ pub fn plan(src_root: &Path, dst_root: &Path, force: bool) -> io::Result<Plan> {
 }
 
 /// True unless the output exists and is at least as new as the source.
-fn needs_transcode(job: &Job) -> bool {
-    let Ok(dst_time) = fs::metadata(&job.dst).and_then(|m| m.modified()) else {
+fn needs_transcode(src: &Path, dst: &Path) -> bool {
+    let Ok(dst_time) = fs::metadata(dst).and_then(|m| m.modified()) else {
         return true;
     };
-    fs::metadata(&job.src).and_then(|m| m.modified()).ok().is_none_or(|src_time| dst_time < src_time)
+    fs::metadata(src).and_then(|m| m.modified()).ok().is_none_or(|src_time| dst_time < src_time)
 }
 
 /// All files under `root`, as paths relative to `root`, sorted, leaving out

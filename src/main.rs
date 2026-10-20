@@ -59,10 +59,19 @@ fn main() {
         exit(0)
     }
     let opts = flags::TransMusic::from_env_or_exit();
-    let plan = match scan::plan(&opts.src, &opts.dst, opts.force) {
+    let settings = Settings {
+        src: opts.src,
+        dst: opts.dst,
+        bitrate_kbps: opts.bitrate,
+        normalize: !opts.no_normalize,
+        loudness_lufs: opts.loudness.unwrap_or(-16.0),
+        true_peak_dbtp: opts.true_peak.unwrap_or(-2.0),
+        keep_art: !opts.strip_art,
+    };
+    let plan = match scan::plan(&settings, opts.force) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("error: scanning {}: {e}", opts.src.display());
+            eprintln!("error: scanning {}: {e}", settings.src.display());
             exit(1)
         }
     };
@@ -81,16 +90,16 @@ fn main() {
         );
     }
     for job in &plan.conflicts {
-        eprintln!("warning: {}: skipped, another source maps to {}", job.rel.display(), job.dst.display());
+        eprintln!("warning: {}: skipped, another source maps to {}", job.display(), settings.output(job).display());
     }
     if verbose {
         for job in &plan.skipped {
-            println!("= {}", job.rel.display());
+            println!("= {}", job.display());
         }
     }
     if opts.dry_run {
         for job in &plan.todo {
-            println!("+ {}", job.rel.display());
+            println!("+ {}", job.display());
         }
         if opts.prune {
             for p in &plan.orphans {
@@ -100,13 +109,6 @@ fn main() {
         return;
     }
 
-    let settings = Settings {
-        bitrate_kbps: opts.bitrate,
-        normalize: !opts.no_normalize,
-        loudness_lufs: opts.loudness.unwrap_or(-16.0),
-        true_peak_dbtp: opts.true_peak.unwrap_or(-2.0),
-        keep_art: !opts.strip_art,
-    };
     let threads = opts.threads.or(std::thread::available_parallelism().ok()).map_or(1, NonZeroUsize::get);
     let total = plan.todo.len();
     let next = AtomicUsize::new(0);
@@ -120,10 +122,10 @@ fn main() {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(job) = plan.todo.get(i) else { break };
                     if !quiet {
-                        println!("[{}/{total}] + {}", i + 1, job.rel.display());
+                        println!("[{}/{total}] + {}", i + 1, job.display());
                     }
                     if let Err(e) = transcode::transcode(job, &settings) {
-                        eprintln!("error: {}: {e}", job.rel.display());
+                        eprintln!("error: {}: {e}", job.display());
                         failures.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -141,7 +143,7 @@ fn main() {
                 eprintln!("error: removing {}: {e}", p.display());
             }
         }
-        scan::remove_empty_dirs(&opts.dst);
+        scan::remove_empty_dirs(&settings.dst);
     }
     if !quiet {
         println!("done: {} transcoded, {} failed, {:.0?}", total - failures, failures, started.elapsed());
