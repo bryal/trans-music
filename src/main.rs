@@ -1,4 +1,6 @@
 mod cli;
+mod decode;
+mod loudness;
 mod scan;
 
 use std::process::exit;
@@ -42,5 +44,22 @@ fn main() {
         }
         return;
     }
-    todo!("transcode")
+    // Temporary: measure loudness only, to validate decoding against ffmpeg.
+    for job in &plan.todo {
+        let mut reader = decode::AudioReader::open(&job.src).unwrap();
+        let mut meter = loudness::Meter::new(reader.channels, reader.rate).unwrap();
+        let (rate, channels) = (reader.rate, reader.channels);
+        let mut frames = 0usize;
+        while let Some(chunk) = reader.next_chunk().unwrap() {
+            frames += chunk.len() / channels;
+            meter.add(chunk).unwrap();
+        }
+        let m = meter.finish().unwrap();
+        let g = m.gain_to(opts.loudness_lufs, opts.true_peak_dbtp);
+        println!(
+            "{}: {} Hz {} ch {:.2}s  I={:.1} LUFS  TP={:.1} dBTP  gain={:+.1} dB{}",
+            job.rel.display(), rate, channels, frames as f64 / rate as f64,
+            m.integrated_lufs, m.true_peak_dbtp, g.db, if g.limited { " (peak-limited)" } else { "" }
+        );
+    }
 }
