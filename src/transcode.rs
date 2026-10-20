@@ -60,7 +60,7 @@ fn measure(src: &Path, target: Target) -> Result<Gain> {
     while let Some(chunk) = reader.next_chunk()? {
         meter.add(chunk)?;
     }
-    Ok(meter.finish()?.gain_to(target.loudness_lufs, target.true_peak_dbtp))
+    Ok(meter.gain_to(target.loudness_lufs, target.true_peak_dbtp)?)
 }
 
 fn encode_into(tmp: &Path, reader: &mut AudioReader, channels: Channels, linear: f32, settings: &Settings) -> Result<()> {
@@ -145,8 +145,8 @@ mod tests {
         assert_eq!(out.len() / 2, expected);
         let lead_peak = out[..2 * 47_000].iter().fold(0f32, |m, v| m.max(v.abs()));
         assert!(lead_peak < 0.01, "leading silence peak {lead_peak}");
-        let lufs = meter.finish().unwrap().integrated_lufs;
-        assert!((lufs + 16.0).abs() < 0.5, "got {lufs} LUFS");
+        let off_by = meter.gain_to(-16.0, f64::INFINITY).unwrap().db;
+        assert!(off_by.abs() < 0.5, "{off_by} dB off -16 LUFS");
         fs::remove_dir_all(&dir).unwrap();
     }
 }
