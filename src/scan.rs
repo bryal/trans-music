@@ -28,12 +28,16 @@ pub struct Plan {
     pub todo: Vec<Job>,
     /// Files under `dst` with no corresponding source file.
     pub orphans: Vec<PathBuf>,
+    /// Sources skipped because an earlier source maps to the same output,
+    /// e.g. `x.flac` next to `x.mp3`.
+    pub conflicts: Vec<Job>,
 }
 
 pub fn plan(src_root: &Path, dst_root: &Path, force: bool) -> io::Result<Plan> {
     let mut all_exts = BTreeSet::new();
     let mut skipped = Vec::new();
     let mut todo = Vec::new();
+    let mut conflicts = Vec::new();
     let mut expected: BTreeSet<PathBuf> = BTreeSet::new();
 
     for rel in walk(src_root)? {
@@ -43,9 +47,10 @@ pub fn plan(src_root: &Path, dst_root: &Path, force: bool) -> io::Result<Plan> {
             continue;
         }
         let dst = dst_root.join(rel.with_extension("opus"));
-        expected.insert(dst.clone());
         let job = Job { src: src_root.join(&rel), dst, rel };
-        if force || needs_transcode(&job) {
+        if !expected.insert(job.dst.clone()) {
+            conflicts.push(job);
+        } else if force || needs_transcode(&job) {
             todo.push(job);
         } else {
             skipped.push(job);
@@ -62,7 +67,7 @@ pub fn plan(src_root: &Path, dst_root: &Path, force: bool) -> io::Result<Plan> {
         Err(e) => return Err(e),
     };
 
-    Ok(Plan { all_exts, skipped, todo, orphans })
+    Ok(Plan { all_exts, skipped, todo, orphans, conflicts })
 }
 
 /// Transcode when the output is missing or older than the source.
@@ -101,4 +106,19 @@ pub fn walk(root: &Path) -> io::Result<Vec<PathBuf>> {
     }
     out.sort();
     Ok(out)
+}
+
+/// Remove directories under `root` left empty by pruning; `root` itself stays.
+pub fn remove_empty_dirs(root: &Path) {
+    fn prune(dir: &Path) -> bool {
+        let Ok(entries) = fs::read_dir(dir) else { return false };
+        let mut empty = true;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let gone = path.is_dir() && !path.is_symlink() && prune(&path) && fs::remove_dir(&path).is_ok();
+            empty &= gone;
+        }
+        empty
+    }
+    prune(root);
 }

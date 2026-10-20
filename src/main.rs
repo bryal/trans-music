@@ -1,12 +1,18 @@
 mod cli;
 mod decode;
+mod encode;
 mod loudness;
 mod resample;
 mod scan;
+mod transcode;
 
 use std::process::exit;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 use cli::Verbosity;
+use transcode::{Settings, Target};
 
 fn main() {
     let opts = cli::parse();
@@ -17,8 +23,10 @@ fn main() {
             exit(1)
         }
     };
+    let quiet = opts.verbosity == Verbosity::Quiet;
+    let verbose = opts.verbosity == Verbosity::Verbose;
 
-    if opts.verbosity >= Verbosity::Normal {
+    if !quiet {
         let exts: Vec<_> = plan.all_exts.iter().map(String::as_str).collect();
         println!("extensions in source: {}", exts.join(" "));
         println!(
@@ -29,7 +37,10 @@ fn main() {
             plan.orphans.len()
         );
     }
-    if opts.verbosity >= Verbosity::Verbose {
+    for job in &plan.conflicts {
+        eprintln!("warning: {}: skipped, another source maps to {}", job.rel.display(), job.dst.display());
+    }
+    if verbose {
         for job in &plan.skipped {
             println!("= {}", job.rel.display());
         }
@@ -45,22 +56,77 @@ fn main() {
         }
         return;
     }
-    // Temporary: measure loudness only, to validate decoding against ffmpeg.
-    for job in &plan.todo {
-        let mut reader = decode::AudioReader::open(&job.src).unwrap();
-        let mut meter = loudness::Meter::new(reader.channels, reader.rate).unwrap();
-        let (rate, channels) = (reader.rate, reader.channels);
-        let mut frames = 0usize;
-        while let Some(chunk) = reader.next_chunk().unwrap() {
-            frames += chunk.len() / channels;
-            meter.add(chunk).unwrap();
+
+    let settings = Settings {
+        bitrate_kbps: opts.bitrate_kbps,
+        target: opts.normalize.then_some(Target {
+            loudness_lufs: opts.loudness_lufs,
+            true_peak_dbtp: opts.true_peak_dbtp,
+        }),
+        keep_art: !opts.strip_art,
+    };
+    let total = plan.todo.len();
+    let next = AtomicUsize::new(0);
+    let failures = Mutex::new(Vec::new());
+    let started = Instant::now();
+
+    std::thread::scope(|scope| {
+        for _ in 0..opts.jobs.min(total.max(1)) {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(job) = plan.todo.get(i) else { break };
+                    if !quiet {
+                        println!("[{}/{total}] + {}", i + 1, job.rel.display());
+                    }
+                    match transcode::transcode(&job.src, &job.dst, &settings) {
+                        Ok(report) => {
+                            if let Some(e) = report.tag_error {
+                                eprintln!("warning: {}: {e}", job.rel.display());
+                            }
+                            if let Some(g) = report.gain {
+                                if g.limited {
+                                    eprintln!(
+                                        "warning: {}: gain capped at {:+.1} dB by the true-peak ceiling",
+                                        job.rel.display(),
+                                        g.db
+                                    );
+                                } else if verbose {
+                                    println!("  {}: gain {:+.1} dB", job.rel.display(), g.db);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("error: {}: {e}", job.rel.display());
+                            failures.lock().unwrap().push(job.rel.clone());
+                        }
+                    }
+                }
+            });
         }
-        let m = meter.finish().unwrap();
-        let g = m.gain_to(opts.loudness_lufs, opts.true_peak_dbtp);
+    });
+
+    let failures = failures.into_inner().unwrap();
+    if opts.prune {
+        for p in &plan.orphans {
+            if !quiet {
+                println!("- {}", p.display());
+            }
+            if let Err(e) = std::fs::remove_file(p) {
+                eprintln!("error: removing {}: {e}", p.display());
+            }
+        }
+        scan::remove_empty_dirs(&opts.dst);
+    }
+    if !quiet {
         println!(
-            "{}: {} Hz {} ch {:.2}s  I={:.1} LUFS  TP={:.1} dBTP  gain={:+.1} dB{}",
-            job.rel.display(), rate, channels, frames as f64 / rate as f64,
-            m.integrated_lufs, m.true_peak_dbtp, g.db, if g.limited { " (peak-limited)" } else { "" }
+            "done: {} transcoded, {} failed, {:.0?}",
+            total - failures.len(),
+            failures.len(),
+            started.elapsed()
         );
+    }
+    if !failures.is_empty() {
+        exit(1)
     }
 }

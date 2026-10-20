@@ -14,7 +14,7 @@ use symphonia::core::errors::Error;
 use symphonia::core::formats::probe::{Hint, Probe};
 use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
 use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::{MetadataContainer, MetadataOptions};
+use symphonia::core::meta::MetadataOptions;
 use symphonia::core::packet::PacketRef;
 use symphonia_core::audio::{AsGenericAudioBufferRef, GenericAudioBufferRef};
 use symphonia_core::support_audio_codec;
@@ -71,12 +71,6 @@ impl AudioReader {
         Ok(Self { track_id: track.id, format, decoder, rate, channels, chunk: Vec::new() })
     }
 
-    /// Tags and cover art found so far (complete once the file is open).
-    pub fn metadata(&mut self) -> MetadataContainer {
-        let mut meta = self.format.metadata();
-        meta.skip_to_latest();
-        meta.current().map(|rev| rev.media.clone()).unwrap_or_default()
-    }
 
     /// The next decoded chunk, or `None` at end of stream.
     pub fn next_chunk(&mut self) -> Result<Option<&[f32]>> {
@@ -111,6 +105,10 @@ struct OpusculeDecoder {
     params: AudioCodecParameters,
     pcm: Vec<f32>,
     buf: AudioBuffer<f32>,
+    /// Encoder delay from OpusHead. The Ogg demuxer trims end padding but
+    /// leaves pre-skip to the decoder.
+    pre_skip: usize,
+    skip: usize,
 }
 
 /// Opus allows up to 120 ms per packet.
@@ -132,7 +130,20 @@ impl RegisterableAudioDecoder for OpusculeDecoder {
         let n = channels.count();
         let inner = opuscule::Decoder::new(opuscule::SampleRate::Hz48000, Self::opus_channels(n)?);
         let buf = AudioBuffer::new(AudioSpec::new(48_000, channels), MAX_FRAMES);
-        Ok(Box::new(Self { inner, params: params.clone(), pcm: vec![0.0; MAX_FRAMES * n], buf }))
+        let pre_skip = match params.extra_data.as_deref() {
+            Some(head) if head.len() >= 12 && head.starts_with(b"OpusHead") => {
+                u16::from_le_bytes([head[10], head[11]]) as usize
+            }
+            _ => 0,
+        };
+        Ok(Box::new(Self {
+            inner,
+            params: params.clone(),
+            pcm: vec![0.0; MAX_FRAMES * n],
+            buf,
+            pre_skip,
+            skip: pre_skip,
+        }))
     }
 
     fn supported_codecs() -> &'static [SupportedAudioCodec] {
@@ -144,6 +155,7 @@ impl AudioDecoder for OpusculeDecoder {
     fn reset(&mut self) {
         let n = self.buf.spec().channels().count();
         self.inner = opuscule::Decoder::new(opuscule::SampleRate::Hz48000, Self::opus_channels(n).unwrap());
+        self.skip = self.pre_skip;
     }
 
     fn codec_info(&self) -> &CodecInfo {
@@ -163,8 +175,9 @@ impl AudioDecoder for OpusculeDecoder {
         self.buf.render_uninit(Some(frames));
         let n = self.buf.spec().channels().count();
         self.buf.copy_from_slice_interleaved(&&self.pcm[..frames * n]);
-        // The Ogg demuxer turns pre-skip and end padding into trim amounts.
-        self.buf.trim(packet.trim_start.get() as usize, packet.trim_end.get() as usize);
+        let start = packet.trim_start.get() as usize + self.skip.min(frames);
+        self.skip -= self.skip.min(frames);
+        self.buf.trim(start.min(frames), packet.trim_end.get() as usize);
         Ok(self.buf.as_generic_audio_buffer_ref())
     }
 

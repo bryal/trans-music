@@ -10,6 +10,9 @@ symphonia-core = "0.6"
 opuscule = "0.2"
 ebur128 = "0.1"
 rubato = "5"
+rusty-opus = "1"
+ogg = "0.9"
+lofty = "0.25"
 
 [profile.release]
 lto = true
