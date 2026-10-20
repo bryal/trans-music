@@ -3,7 +3,7 @@
 
 use std::fs::File;
 use std::path::Path;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 
 use symphonia::core::audio::{Audio, AudioBuffer, AudioMut, AudioSpec};
 use symphonia::core::codecs::audio::well_known::CODEC_ID_OPUS;
@@ -24,7 +24,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 static CODECS: LazyLock<CodecRegistry> = LazyLock::new(|| {
     let mut r = CodecRegistry::new();
     symphonia::default::register_enabled_codecs(&mut r);
-    r.register_audio_decoder::<OpusculeDecoder>();
+    r.register_audio_decoder::<OpusDecoder>();
     r
 });
 
@@ -78,7 +78,11 @@ impl AudioReader {
             let packet = match self.format.next_packet() {
                 Ok(Some(p)) => p,
                 Ok(None) => return Ok(None),
-                Err(Error::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+                // A clean end of stream is `Ok(None)`; hitting EOF inside a
+                // packet means the file is truncated.
+                Err(Error::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    return Err(Error::DecodeError("file is truncated"));
+                }
                 Err(e) => return Err(e),
             };
             if packet.track_id != self.track_id {
@@ -98,10 +102,11 @@ impl AudioReader {
     }
 }
 
-/// `opuscule` wrapped as a symphonia decoder. Only channel mapping family 0
+/// libopus wrapped as a symphonia decoder. Only channel mapping family 0
 /// (mono and stereo) is supported, which covers music libraries.
-struct OpusculeDecoder {
-    inner: opuscule::Decoder,
+struct OpusDecoder {
+    /// Behind a mutex only because symphonia wants decoders to be `Sync`.
+    inner: Mutex<opusic_c::Decoder>,
     params: AudioCodecParameters,
     pcm: Vec<f32>,
     buf: AudioBuffer<f32>,
@@ -114,21 +119,22 @@ struct OpusculeDecoder {
 /// Opus allows up to 120 ms per packet.
 const MAX_FRAMES: usize = 5760;
 
-impl OpusculeDecoder {
-    fn opus_channels(n: usize) -> Result<opuscule::Channels> {
-        match n {
-            1 => Ok(opuscule::Channels::Mono),
-            2 => Ok(opuscule::Channels::Stereo),
-            _ => Err(Error::Unsupported("opus: only mono and stereo are supported")),
-        }
+impl OpusDecoder {
+    fn new_inner(n: usize) -> Result<opusic_c::Decoder> {
+        let layout = match n {
+            1 => opusic_c::Channels::Mono,
+            2 => opusic_c::Channels::Stereo,
+            _ => return Err(Error::Unsupported("opus: only mono and stereo are supported")),
+        };
+        opusic_c::Decoder::new(layout, opusic_c::SampleRate::Hz48000).map_err(opus_error)
     }
 }
 
-impl RegisterableAudioDecoder for OpusculeDecoder {
+impl RegisterableAudioDecoder for OpusDecoder {
     fn try_registry_new(params: &AudioCodecParameters, _opts: &AudioDecoderOptions) -> Result<Box<dyn AudioDecoder>> {
         let channels = params.channels.clone().ok_or(Error::Unsupported("opus: unknown channels"))?;
         let n = channels.count();
-        let inner = opuscule::Decoder::new(opuscule::SampleRate::Hz48000, Self::opus_channels(n)?);
+        let inner = Mutex::new(Self::new_inner(n)?);
         let buf = AudioBuffer::new(AudioSpec::new(48_000, channels), MAX_FRAMES);
         let pre_skip = match params.extra_data.as_deref() {
             Some(head) if head.len() >= 12 && head.starts_with(b"OpusHead") => {
@@ -147,14 +153,13 @@ impl RegisterableAudioDecoder for OpusculeDecoder {
     }
 
     fn supported_codecs() -> &'static [SupportedAudioCodec] {
-        &[support_audio_codec!(CODEC_ID_OPUS, "opus", "Opus (opuscule)")]
+        &[support_audio_codec!(CODEC_ID_OPUS, "opus", "Opus (libopus)")]
     }
 }
 
-impl AudioDecoder for OpusculeDecoder {
+impl AudioDecoder for OpusDecoder {
     fn reset(&mut self) {
-        let n = self.buf.spec().channels().count();
-        self.inner = opuscule::Decoder::new(opuscule::SampleRate::Hz48000, Self::opus_channels(n).unwrap());
+        let _ = self.inner.get_mut().unwrap().reset();
         self.skip = self.pre_skip;
     }
 
@@ -169,8 +174,10 @@ impl AudioDecoder for OpusculeDecoder {
     fn decode_ref(&mut self, packet: &PacketRef<'_>) -> Result<GenericAudioBufferRef<'_>> {
         let frames = self
             .inner
-            .decode(Some(packet.data), &mut self.pcm, false)
-            .map_err(|e| Error::DecodeError(opus_error_name(e)))?;
+            .get_mut()
+            .unwrap()
+            .decode_float_to_slice(packet.data, &mut self.pcm, false)
+            .map_err(|_| Error::DecodeError("opus: invalid packet"))?;
         self.buf.clear();
         self.buf.render_uninit(Some(frames));
         let n = self.buf.spec().channels().count();
@@ -190,12 +197,9 @@ impl AudioDecoder for OpusculeDecoder {
     }
 }
 
-fn opus_error_name(e: opuscule::Error) -> &'static str {
-    match e {
-        opuscule::Error::BadArg => "opus: bad argument",
-        opuscule::Error::BufferTooSmall => "opus: buffer too small",
-        opuscule::Error::InternalError => "opus: internal error",
-        opuscule::Error::InvalidPacket => "opus: invalid packet",
-        _ => "opus: unknown error",
-    }
+fn opus_error(e: opusic_c::ErrorCode) -> Error {
+    Error::Unsupported(match e {
+        opusic_c::ErrorCode::AllocFail => "opus: allocation failed",
+        _ => "opus: bad argument",
+    })
 }

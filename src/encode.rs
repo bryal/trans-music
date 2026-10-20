@@ -13,33 +13,57 @@ use lofty::ogg::{OggPictureStorage, OpusFile, VorbisFile};
 use lofty::probe::Probe;
 use lofty::tag::{Tag, TagExt, TagType};
 use ogg::{PacketWriteEndInfo, PacketWriter};
-use rusty_opus::{Application, OpusEncoder, SignalType};
+use opusic_c::{Application, Bitrate, Channels, Encoder, SampleRate, Signal};
 
 pub const RATE: u32 = 48_000;
-/// 20 ms, the frame size libopus-style encoders are tuned for.
+/// 20 ms, the frame size libopus is tuned for.
 pub const FRAME: usize = 960;
-/// rusty-opus' encoder delay at 48 kHz (the CELT overlap; it has no extra
-/// delay compensation like libopus), verified by the test below.
-pub const PRE_SKIP: u16 = 120;
 const MAX_PACKET: usize = 1276;
 const VENDOR: &str = concat!("trans-music ", env!("CARGO_PKG_VERSION"));
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-pub fn new_encoder(channels: usize, bitrate_kbps: u32) -> Result<OpusEncoder> {
-    let mut enc = OpusEncoder::new(RATE as i32, channels, Application::Audio)?;
-    enc.bitrate_bps = (bitrate_kbps * 1000) as i32;
-    enc.complexity = 10;
-    enc.signal_type = Some(SignalType::Music);
+/// libopus status codes are plain integers; give them an error type.
+#[derive(Debug)]
+pub struct OpusError(pub opusic_c::ErrorCode);
+
+impl std::fmt::Display for OpusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "opus: {:?}", self.0)
+    }
+}
+
+impl std::error::Error for OpusError {}
+
+fn opus<T>(r: std::result::Result<T, opusic_c::ErrorCode>) -> Result<T> {
+    r.map_err(|e| OpusError(e).into())
+}
+
+pub fn channels(n: usize) -> Result<Channels> {
+    match n {
+        1 => Ok(Channels::Mono),
+        2 => Ok(Channels::Stereo),
+        _ => Err(format!("{n} channels; only mono and stereo are supported").into()),
+    }
+}
+
+pub fn new_encoder(channels: Channels, bitrate_kbps: u32) -> Result<Encoder> {
+    let mut enc = opus(Encoder::new(channels, SampleRate::Hz48000, Application::Audio))?;
+    opus(enc.set_bitrate(Bitrate::Value(bitrate_kbps * 1000)))?;
+    opus(enc.set_vbr(true))?;
+    opus(enc.set_complexity(10))?;
+    opus(enc.set_signal(Signal::Music))?;
     Ok(enc)
 }
 
 /// Streams 48 kHz interleaved f32 into an Ogg Opus file.
 pub struct OggOpusWriter<W: Write> {
-    enc: OpusEncoder,
+    enc: Encoder,
     ogg: PacketWriter<'static, W>,
     serial: u32,
     channels: usize,
+    /// Encoder delay in samples; decoders drop this many at the start.
+    pre_skip: u16,
     pending: Vec<f32>,
     packet: Vec<u8>,
     /// Real (unpadded) frames fed so far.
@@ -50,15 +74,18 @@ pub struct OggOpusWriter<W: Write> {
 
 impl<W: Write> OggOpusWriter<W> {
     pub fn new(out: W, channels: usize, input_rate: u32, bitrate_kbps: u32) -> Result<Self> {
+        let mut enc = new_encoder(self::channels(channels)?, bitrate_kbps)?;
+        let pre_skip = u16::try_from(opus(enc.get_look_ahead())?)?;
         let serial = std::hash::RandomState::new().hash_one(0u8) as u32;
         let mut ogg = PacketWriter::new(out);
-        ogg.write_packet(opus_head(channels as u8, input_rate), serial, PacketWriteEndInfo::EndPage, 0)?;
+        ogg.write_packet(opus_head(channels as u8, pre_skip, input_rate), serial, PacketWriteEndInfo::EndPage, 0)?;
         ogg.write_packet(opus_tags(), serial, PacketWriteEndInfo::EndPage, 0)?;
         Ok(Self {
-            enc: new_encoder(channels, bitrate_kbps)?,
+            enc,
             ogg,
             serial,
             channels,
+            pre_skip,
             pending: Vec::new(),
             packet: vec![0; MAX_PACKET],
             frames: 0,
@@ -82,7 +109,7 @@ impl<W: Write> OggOpusWriter<W> {
     /// Pads so the decoder can flush the encoder delay, closes the stream.
     pub fn finish(mut self) -> Result<W> {
         let need = FRAME * self.channels;
-        let min_len = self.pending.len() + PRE_SKIP as usize * self.channels;
+        let min_len = self.pending.len() + self.pre_skip as usize * self.channels;
         self.pending.resize(min_len.div_ceil(need) * need, 0.0);
         let frames = self.pending.len() / need;
         for i in 0..frames {
@@ -94,12 +121,12 @@ impl<W: Write> OggOpusWriter<W> {
 
     fn encode_frame(&mut self, offset: usize, end: PacketWriteEndInfo) -> Result<()> {
         let input = &self.pending[offset..offset + FRAME * self.channels];
-        let len = self.enc.encode(input, FRAME, &mut self.packet)?;
+        let len = opus(self.enc.encode_float_to_slice(input, &mut self.packet))?;
         self.encoded += FRAME as u64;
         // Granule positions count decoded samples, pre-skip included; the
         // last one is clamped so the padding is trimmed on playback.
         let granule = match end {
-            PacketWriteEndInfo::EndStream => self.frames + PRE_SKIP as u64,
+            PacketWriteEndInfo::EndStream => self.frames + self.pre_skip as u64,
             _ => self.encoded,
         };
         self.ogg.write_packet(self.packet[..len].to_vec(), self.serial, end, granule)?;
@@ -107,12 +134,12 @@ impl<W: Write> OggOpusWriter<W> {
     }
 }
 
-fn opus_head(channels: u8, input_rate: u32) -> Vec<u8> {
+fn opus_head(channels: u8, pre_skip: u16, input_rate: u32) -> Vec<u8> {
     let mut h = Vec::with_capacity(19);
     h.extend_from_slice(b"OpusHead");
     h.push(1);
     h.push(channels);
-    h.extend_from_slice(&PRE_SKIP.to_le_bytes());
+    h.extend_from_slice(&pre_skip.to_le_bytes());
     h.extend_from_slice(&input_rate.to_le_bytes());
     h.extend_from_slice(&0i16.to_le_bytes()); // output gain
     h.push(0); // channel mapping family: mono/stereo
@@ -181,7 +208,9 @@ fn read_comments(src: &Path, keep_art: bool) -> std::result::Result<VorbisCommen
                     }
                 }
                 for p in t.pictures() {
-                    tag.push_picture(p.clone());
+                    if !tag.pictures().iter().any(|q| q.data() == p.data()) {
+                        tag.push_picture(p.clone());
+                    }
                 }
             }
             VorbisComments::from(tag)
@@ -205,28 +234,29 @@ pub fn buffered(path: &Path) -> io::Result<BufWriter<File>> {
 mod tests {
     use super::*;
 
-    /// An impulse encoded and decoded comes back `PRE_SKIP` frames late.
+    /// An impulse encoded and decoded comes back exactly `get_look_ahead()`
+    /// frames late, which is what OpusHead's pre-skip promises decoders.
     #[test]
-    fn encoder_delay_is_pre_skip() {
-        for channels in [1, 2] {
-            let mut enc = new_encoder(channels, 120).unwrap();
-            let layout = if channels == 1 { opuscule::Channels::Mono } else { opuscule::Channels::Stereo };
-            let mut dec = opuscule::Decoder::new(opuscule::SampleRate::Hz48000, layout);
-            let mut input = vec![0.0f32; FRAME * 8 * channels];
-            input[2000 * channels] = 0.9;
+    fn encoder_delay_is_lookahead() {
+        for (n, layout) in [(1, Channels::Mono), (2, Channels::Stereo)] {
+            let mut enc = new_encoder(layout, 120).unwrap();
+            let delay = enc.get_look_ahead().unwrap() as usize;
+            let mut dec = opusic_c::Decoder::new(layout, SampleRate::Hz48000).unwrap();
+            let mut input = vec![0.0f32; FRAME * 8 * n];
+            input[2000 * n] = 0.9;
             let mut packet = vec![0u8; MAX_PACKET];
             let mut output = Vec::new();
-            let mut pcm = vec![0.0f32; FRAME * channels];
-            for frame in input.chunks(FRAME * channels) {
-                let len = enc.encode(frame, FRAME, &mut packet).unwrap();
-                let n = dec.decode(Some(&packet[..len]), &mut pcm, false).unwrap();
-                output.extend_from_slice(&pcm[..n * channels]);
+            let mut pcm = vec![0.0f32; FRAME * n];
+            for frame in input.chunks(FRAME * n) {
+                let len = enc.encode_float_to_slice(frame, &mut packet).unwrap();
+                let frames = dec.decode_float_to_slice(&packet[..len], &mut pcm, false).unwrap();
+                output.extend_from_slice(&pcm[..frames * n]);
             }
             let (peak_at, _) = output
                 .iter()
                 .enumerate()
                 .fold((0, 0f32), |(bi, bv), (i, &v)| if v.abs() > bv { (i, v.abs()) } else { (bi, bv) });
-            assert_eq!(peak_at / channels, 2000 + PRE_SKIP as usize, "{channels} channels");
+            assert_eq!(peak_at / n, 2000 + delay, "{n} channels");
         }
     }
 }
