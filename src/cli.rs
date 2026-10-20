@@ -40,8 +40,6 @@ mod flags {
             optional -q,--quiet
             /// Report every file, including skipped ones
             optional -v,--verbose
-            /// Show version
-            optional -V,--version
         }
     }
 
@@ -64,7 +62,6 @@ mod flags {
         pub strip_art: bool,
         pub quiet: bool,
         pub verbose: bool,
-        pub version: bool,
     }
 
     impl TransMusic {
@@ -112,11 +109,12 @@ pub enum Verbosity {
 /// Parses the command line, applying defaults and range checks. Exits with
 /// a message on bad usage.
 pub fn parse() -> Opts {
-    let f = flags::TransMusic::from_env_or_exit();
-    if f.version {
+    // Checked before parsing so it works without the required paths.
+    if std::env::args().skip(1).any(|a| a == "-V" || a == "--version") {
         println!("trans-music {}", env!("CARGO_PKG_VERSION"));
         exit(0)
     }
+    let f = flags::TransMusic::from_env_or_exit();
     let bitrate_kbps = f.bitrate.unwrap_or(120);
     if !(6..=510).contains(&bitrate_kbps) {
         usage_error("--bitrate must be between 6 and 510 kbit/s");
