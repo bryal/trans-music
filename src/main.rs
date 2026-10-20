@@ -100,12 +100,7 @@ fn main() {
         scan::remove_empty_dirs(&opts.dst);
     }
     if !quiet {
-        println!(
-            "done: {} transcoded, {} failed, {:.0?}",
-            total - failures,
-            failures,
-            started.elapsed()
-        );
+        println!("done: {} transcoded, {} failed, {:.0?}", total - failures, failures, started.elapsed());
     }
     if failures > 0 {
         exit(1)

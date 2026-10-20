@@ -6,9 +6,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// Extensions (lower case, without dot) treated as audio input.
-pub const AUDIO_EXTS: &[&str] = &[
-    "flac", "m4a", "mp4", "mp3", "ogg", "oga", "opus", "wav", "wave", "aac", "alac", "mka",
-];
+pub const AUDIO_EXTS: &[&str] = &["flac", "m4a", "mp4", "mp3", "ogg", "oga", "opus", "wav", "wave", "aac", "alac", "mka"];
 
 /// One source file and where its transcode goes.
 pub struct Job {
@@ -61,11 +59,7 @@ pub fn plan(src_root: &Path, dst_root: &Path, force: bool) -> io::Result<Plan> {
 
     // Never follow links in DST: pruning must not reach outside it.
     let orphans = match walk(dst_root, false, Some(&src_canon)) {
-        Ok(rels) => rels
-            .into_iter()
-            .map(|r| dst_root.join(r))
-            .filter(|p| !expected.contains(p))
-            .collect(),
+        Ok(rels) => rels.into_iter().map(|r| dst_root.join(r)).filter(|p| !expected.contains(p)).collect(),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(e),
     };

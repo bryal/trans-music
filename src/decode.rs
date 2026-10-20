@@ -21,7 +21,10 @@ enum Decoder {
     Symphonia(Box<dyn AudioDecoder>),
     /// `skip` counts the OpusHead pre-skip frames still to drop; the
     /// demuxer trims only the end padding.
-    Opus { dec: opusic_c::Decoder, skip: usize },
+    Opus {
+        dec: opusic_c::Decoder,
+        skip: usize,
+    },
 }
 
 /// A decoding session over one file, yielding interleaved f32 chunks.
@@ -55,8 +58,8 @@ impl AudioReader {
                 Some(&[_, _, lo, hi]) => u16::from_le_bytes([lo, hi]),
                 _ => 0,
             };
-            let dec = opusic_c::Decoder::new(channels, opusic_c::SampleRate::Hz48000)
-                .map_err(|e| Error::Unsupported(e.message()))?;
+            let dec =
+                opusic_c::Decoder::new(channels, opusic_c::SampleRate::Hz48000).map_err(|e| Error::Unsupported(e.message()))?;
             Decoder::Opus { dec, skip: skip.into() }
         } else {
             Decoder::Symphonia(symphonia::default::get_codecs().make_audio_decoder(params, &Default::default())?)

@@ -60,13 +60,7 @@ fn measure(src: &Path, settings: &Settings) -> Result<Gain> {
     Ok(loudness::gain_to(&meter, settings.loudness_lufs, settings.true_peak_dbtp)?)
 }
 
-fn encode_into(
-    tmp: &Path,
-    reader: &mut AudioReader,
-    linear: f32,
-    tags: VorbisComments,
-    settings: &Settings,
-) -> Result<()> {
+fn encode_into(tmp: &Path, reader: &mut AudioReader, linear: f32, tags: VorbisComments, settings: &Settings) -> Result<()> {
     let (rate, channels) = (reader.rate, reader.channels);
     let out = BufWriter::new(File::create(tmp)?);
     let mut writer = OggOpusWriter::new(out, channels, rate, settings.bitrate_kbps, tags)?;
