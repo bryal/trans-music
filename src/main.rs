@@ -35,7 +35,7 @@ mod flags {
             /// Skip loudness normalization
             optional -N,--no-normalize
             /// Worker threads, each transcoding one file at a time [default: CPU count]
-            optional -t,--threads n: NonZeroUsize
+            optional --threads n: NonZeroUsize
             /// Re-transcode even if the output is up to date
             optional -f,--force
             /// List what would be done, change nothing
