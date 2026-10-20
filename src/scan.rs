@@ -34,26 +34,20 @@ pub struct Plan {
 }
 
 pub fn plan(src_root: &Path, dst_root: &Path, force: bool) -> io::Result<Plan> {
-    if let (Ok(s), Ok(d)) = (fs::canonicalize(src_root), fs::canonicalize(dst_root)) {
-        if s == d {
-            return Err(io::Error::other("SRC and DST are the same directory"));
-        }
+    let src_canon = fs::canonicalize(src_root)?;
+    let dst_canon = fs::canonicalize(dst_root).ok();
+    if dst_canon.as_ref() == Some(&src_canon) {
+        return Err(io::Error::other("SRC and DST are the same directory"));
     }
     let mut all_exts = BTreeSet::new();
     let mut skipped = Vec::new();
     let mut todo = Vec::new();
     let mut conflicts = Vec::new();
     let mut expected: BTreeSet<PathBuf> = BTreeSet::new();
-    // A destination inside the source must not be scanned as input.
-    let dst_in_src = fs::canonicalize(dst_root)
-        .ok()
-        .zip(fs::canonicalize(src_root).ok())
-        .and_then(|(d, s)| d.strip_prefix(s).ok().map(Path::to_path_buf));
 
-    for rel in walk(src_root, true)? {
-        if dst_in_src.as_ref().is_some_and(|d| rel.starts_with(d)) {
-            continue;
-        }
+    // Each walk skips the other root: a DST inside SRC is not read as input,
+    // and a SRC inside DST is not pruned.
+    for rel in walk(src_root, true, dst_canon.as_deref())? {
         let ext = extension(&rel);
         all_exts.insert(ext.clone());
         if !AUDIO_EXTS.contains(&ext.as_str()) {
@@ -71,7 +65,7 @@ pub fn plan(src_root: &Path, dst_root: &Path, force: bool) -> io::Result<Plan> {
     }
 
     // Never follow links in DST: pruning must not reach outside it.
-    let orphans = match walk(dst_root, false) {
+    let orphans = match walk(dst_root, false, Some(&src_canon)) {
         Ok(rels) => rels
             .into_iter()
             .map(|r| dst_root.join(r))
@@ -99,16 +93,18 @@ fn extension(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// All regular files under `root`, as paths relative to `root`, sorted.
-/// With `follow_links`, symlinked directories are entered once each, so a
-/// link to an ancestor cannot loop.
-pub fn walk(root: &Path, follow_links: bool) -> io::Result<Vec<PathBuf>> {
+/// All files under `root`, as paths relative to `root`, sorted, leaving out
+/// the directory whose canonical path is `skip`. With `follow_links`,
+/// symlinked directories are entered once each, so a link to an ancestor
+/// cannot loop.
+fn walk(root: &Path, follow_links: bool, skip: Option<&Path>) -> io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
     let mut stack = vec![PathBuf::new()];
     while let Some(rel_dir) = stack.pop() {
         let dir = root.join(&rel_dir);
-        if !seen.insert(fs::canonicalize(&dir)?) {
+        let canon = fs::canonicalize(&dir)?;
+        if Some(canon.as_path()) == skip || !seen.insert(canon) {
             continue;
         }
         for entry in fs::read_dir(&dir)? {
