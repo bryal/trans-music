@@ -72,7 +72,7 @@ fn main() {
     let plan = match scan::plan(&settings, opts.force) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("error: scanning {}: {e}", settings.src.display());
+            eprintln!("error: scanning {:?}: {e}", settings.src);
             exit(1)
         }
     };
@@ -91,7 +91,7 @@ fn main() {
         );
     }
     for job in &plan.conflicts {
-        eprintln!("warning: {}: skipped, another source maps to {}", job.display(), settings.output(job).display());
+        eprintln!("warning: {job:?}: skipped, another source maps to {:?}", settings.output(job));
     }
     if verbose {
         for job in &plan.skipped {
@@ -126,7 +126,7 @@ fn main() {
                         println!("[{}/{total}] + {}", i + 1, job.display());
                     }
                     if let Err(e) = transcode::transcode(job, &settings) {
-                        eprintln!("error: {}: {e}", job.display());
+                        eprintln!("error: {job:?}: {e}");
                         failures.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -141,7 +141,7 @@ fn main() {
                 println!("- {}", p.display());
             }
             if let Err(e) = std::fs::remove_file(p) {
-                eprintln!("error: removing {}: {e}", p.display());
+                eprintln!("error: removing {p:?}: {e}");
             }
         }
         scan::remove_empty_dirs(&settings.dst);

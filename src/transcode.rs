@@ -36,7 +36,7 @@ pub fn transcode(job: &Path, settings: &Settings) -> Result<()> {
     let dst = settings.output(job);
     let mut reader = AudioReader::open(&src)?;
     let tags = encode::read_tags(&src, settings.keep_art).unwrap_or_else(|e| {
-        eprintln!("warning: {}: tags not copied: {e}", job.display());
+        eprintln!("warning: {job:?}: tags not copied: {e}");
         Default::default()
     });
     let linear = match &settings.normalize {
@@ -44,7 +44,7 @@ pub fn transcode(job: &Path, settings: &Settings) -> Result<()> {
         Some(target) => {
             let gain = measure(&src, target)?;
             if gain.limited {
-                eprintln!("warning: {}: gain capped at {:+.1} dB by the true-peak ceiling", job.display(), gain.db);
+                eprintln!("warning: {job:?}: gain capped at {:+.1} dB by the true-peak ceiling", gain.db);
             }
             gain.linear()
         }
