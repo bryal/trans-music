@@ -1,12 +1,14 @@
 //! The per-file pipeline: measure, then decode again, normalize, resample, encode, tag.
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::BufWriter;
 use std::path::Path;
 
 use crate::decode::AudioReader;
 use crate::encode::{self, OggOpusWriter, RATE};
 use crate::loudness::{Gain, Meter};
 use crate::resample::Resampler;
+use opusic_c::Channels;
 
 pub type Result<T> = encode::Result<T>;
 
@@ -29,21 +31,18 @@ pub struct Report {
 }
 
 pub fn transcode(src: &Path, dst: &Path, settings: &Settings) -> Result<Report> {
+    let mut reader = AudioReader::open(src)?;
+    let channels = encode::channels(reader.channels)?;
     let gain = settings.target.map(|t| measure(src, t)).transpose()?;
     let linear = gain.map_or(1.0, |g| g.linear());
 
-    let mut reader = AudioReader::open(src)?;
-    let (rate, channels) = (reader.rate, reader.channels);
-    if channels > 2 {
-        return Err(format!("{channels} channels; only mono and stereo are supported").into());
-    }
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)?;
     }
     // Write next to the destination, rename when complete, so an interrupted
     // run never leaves a truncated file that looks up to date.
     let tmp = dst.with_extension("opus.part");
-    let result = encode_into(&tmp, &mut reader, rate, channels, linear, settings)
+    let result = encode_into(&tmp, &mut reader, channels, linear, settings)
         .and_then(|()| encode::copy_tags(src, &tmp, settings.keep_art))
         .and_then(|warning| fs::rename(&tmp, dst).map(|()| warning).map_err(Into::into));
     match result {
@@ -64,16 +63,10 @@ fn measure(src: &Path, target: Target) -> Result<Gain> {
     Ok(meter.finish()?.gain_to(target.loudness_lufs, target.true_peak_dbtp))
 }
 
-fn encode_into(
-    tmp: &Path,
-    reader: &mut AudioReader,
-    rate: u32,
-    channels: usize,
-    linear: f32,
-    settings: &Settings,
-) -> Result<()> {
-    let mut writer = OggOpusWriter::new(encode::buffered(tmp)?, channels, rate, settings.bitrate_kbps)?;
-    let mut resampler = (rate != RATE).then(|| Resampler::new(rate, RATE, channels)).transpose()?;
+fn encode_into(tmp: &Path, reader: &mut AudioReader, channels: Channels, linear: f32, settings: &Settings) -> Result<()> {
+    let rate = reader.rate;
+    let mut writer = OggOpusWriter::new(BufWriter::new(File::create(tmp)?), channels, rate, settings.bitrate_kbps)?;
+    let mut resampler = (rate != RATE).then(|| Resampler::new(rate, RATE, channels as usize)).transpose()?;
     let mut scaled = Vec::new();
     while let Some(chunk) = reader.next_chunk()? {
         scaled.clear();

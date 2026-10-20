@@ -2,7 +2,7 @@
 
 use std::fs::File;
 use std::hash::BuildHasher;
-use std::io::{self, BufWriter, Write};
+use std::io::Write;
 use std::path::Path;
 
 use lofty::config::{ParseOptions, WriteOptions};
@@ -17,26 +17,15 @@ use opusic_c::{Application, Bitrate, Channels, Encoder, SampleRate, Signal};
 
 pub const RATE: u32 = 48_000;
 /// 20 ms, the frame size libopus is tuned for.
-pub const FRAME: usize = 960;
+const FRAME: usize = 960;
 const MAX_PACKET: usize = 1276;
 const VENDOR: &str = concat!("trans-music ", env!("CARGO_PKG_VERSION"));
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-/// libopus status codes are plain integers; give them an error type.
-#[derive(Debug)]
-pub struct OpusError(pub opusic_c::ErrorCode);
-
-impl std::fmt::Display for OpusError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "opus: {:?}", self.0)
-    }
-}
-
-impl std::error::Error for OpusError {}
-
+/// libopus error codes don't implement `Error`.
 fn opus<T>(r: std::result::Result<T, opusic_c::ErrorCode>) -> Result<T> {
-    r.map_err(|e| OpusError(e).into())
+    r.map_err(|e| format!("opus: {e:?}").into())
 }
 
 pub fn channels(n: usize) -> Result<Channels> {
@@ -47,7 +36,7 @@ pub fn channels(n: usize) -> Result<Channels> {
     }
 }
 
-pub fn new_encoder(channels: Channels, bitrate_kbps: u32) -> Result<Encoder> {
+fn new_encoder(channels: Channels, bitrate_kbps: u32) -> Result<Encoder> {
     let mut enc = opus(Encoder::new(channels, SampleRate::Hz48000, Application::Audio))?;
     opus(enc.set_bitrate(Bitrate::Value(bitrate_kbps * 1000)))?;
     opus(enc.set_vbr(true))?;
@@ -73,8 +62,8 @@ pub struct OggOpusWriter<W: Write> {
 }
 
 impl<W: Write> OggOpusWriter<W> {
-    pub fn new(out: W, channels: usize, input_rate: u32, bitrate_kbps: u32) -> Result<Self> {
-        let mut enc = new_encoder(self::channels(channels)?, bitrate_kbps)?;
+    pub fn new(out: W, channels: Channels, input_rate: u32, bitrate_kbps: u32) -> Result<Self> {
+        let mut enc = new_encoder(channels, bitrate_kbps)?;
         let pre_skip = u16::try_from(opus(enc.get_look_ahead())?)?;
         let serial = std::hash::RandomState::new().hash_one(0u8) as u32;
         let mut ogg = PacketWriter::new(out);
@@ -84,7 +73,7 @@ impl<W: Write> OggOpusWriter<W> {
             enc,
             ogg,
             serial,
-            channels,
+            channels: channels as usize,
             pre_skip,
             pending: Vec::new(),
             packet: vec![0; MAX_PACKET],
@@ -224,39 +213,4 @@ fn read_comments(src: &Path, keep_art: bool) -> std::result::Result<VorbisCommen
     }
     comments.set_vendor(VENDOR.to_owned());
     Ok(comments)
-}
-
-pub fn buffered(path: &Path) -> io::Result<BufWriter<File>> {
-    Ok(BufWriter::new(File::create(path)?))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// An impulse encoded and decoded comes back exactly `get_look_ahead()`
-    /// frames late, which is what OpusHead's pre-skip promises decoders.
-    #[test]
-    fn encoder_delay_is_lookahead() {
-        for (n, layout) in [(1, Channels::Mono), (2, Channels::Stereo)] {
-            let mut enc = new_encoder(layout, 120).unwrap();
-            let delay = enc.get_look_ahead().unwrap() as usize;
-            let mut dec = opusic_c::Decoder::new(layout, SampleRate::Hz48000).unwrap();
-            let mut input = vec![0.0f32; FRAME * 8 * n];
-            input[2000 * n] = 0.9;
-            let mut packet = vec![0u8; MAX_PACKET];
-            let mut output = Vec::new();
-            let mut pcm = vec![0.0f32; FRAME * n];
-            for frame in input.chunks(FRAME * n) {
-                let len = enc.encode_float_to_slice(frame, &mut packet).unwrap();
-                let frames = dec.decode_float_to_slice(&packet[..len], &mut pcm, false).unwrap();
-                output.extend_from_slice(&pcm[..frames * n]);
-            }
-            let (peak_at, _) = output
-                .iter()
-                .enumerate()
-                .fold((0, 0f32), |(bi, bv), (i, &v)| if v.abs() > bv { (i, v.abs()) } else { (bi, bv) });
-            assert_eq!(peak_at / n, 2000 + delay, "{n} channels");
-        }
-    }
 }

@@ -119,22 +119,13 @@ struct OpusDecoder {
 /// Opus allows up to 120 ms per packet.
 const MAX_FRAMES: usize = 5760;
 
-impl OpusDecoder {
-    fn new_inner(n: usize) -> Result<opusic_c::Decoder> {
-        let layout = match n {
-            1 => opusic_c::Channels::Mono,
-            2 => opusic_c::Channels::Stereo,
-            _ => return Err(Error::Unsupported("opus: only mono and stereo are supported")),
-        };
-        opusic_c::Decoder::new(layout, opusic_c::SampleRate::Hz48000).map_err(opus_error)
-    }
-}
-
 impl RegisterableAudioDecoder for OpusDecoder {
     fn try_registry_new(params: &AudioCodecParameters, _opts: &AudioDecoderOptions) -> Result<Box<dyn AudioDecoder>> {
         let channels = params.channels.clone().ok_or(Error::Unsupported("opus: unknown channels"))?;
         let n = channels.count();
-        let inner = Mutex::new(Self::new_inner(n)?);
+        let layout = crate::encode::channels(n).map_err(|_| Error::Unsupported("opus: only mono and stereo"))?;
+        let inner = opusic_c::Decoder::new(layout, opusic_c::SampleRate::Hz48000)
+            .map_err(|_| Error::Unsupported("opus: decoder init failed"))?;
         let buf = AudioBuffer::new(AudioSpec::new(48_000, channels), MAX_FRAMES);
         let pre_skip = match params.extra_data.as_deref() {
             Some(head) if head.len() >= 12 && head.starts_with(b"OpusHead") => {
@@ -143,7 +134,7 @@ impl RegisterableAudioDecoder for OpusDecoder {
             _ => 0,
         };
         Ok(Box::new(Self {
-            inner,
+            inner: Mutex::new(inner),
             params: params.clone(),
             pcm: vec![0.0; MAX_FRAMES * n],
             buf,
@@ -195,11 +186,4 @@ impl AudioDecoder for OpusDecoder {
     fn last_decoded(&self) -> GenericAudioBufferRef<'_> {
         self.buf.as_generic_audio_buffer_ref()
     }
-}
-
-fn opus_error(e: opusic_c::ErrorCode) -> Error {
-    Error::Unsupported(match e {
-        opusic_c::ErrorCode::AllocFail => "opus: allocation failed",
-        _ => "opus: bad argument",
-    })
 }
