@@ -119,8 +119,9 @@ impl<W: Write> OggOpusWriter<W> {
 }
 
 fn opus_head(channels: u8, pre_skip: u16, input_rate: u32) -> Vec<u8> {
-    let mapping_family_and_gain = [0, 0, 0];
-    [b"OpusHead", &[1, channels][..], &pre_skip.to_le_bytes(), &input_rate.to_le_bytes(), &mapping_family_and_gain].concat()
+    let (version, output_gain, mapping_family) = (1, [0, 0], 0);
+    let magic = b"OpusHead".as_slice();
+    [magic, &[version, channels], &pre_skip.to_le_bytes(), &input_rate.to_le_bytes(), &output_gain, &[mapping_family]].concat()
 }
 
 const GAIN_TAGS: [&str; 6] = [

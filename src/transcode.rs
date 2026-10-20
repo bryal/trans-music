@@ -1,4 +1,4 @@
-//! The per-file pipeline: measure, then decode again, normalize, resample, encode, tag.
+//! The per-file pipeline: measure loudness, then decode again, apply the gain, resample and encode.
 
 use std::fs::{self, File};
 use std::io::BufWriter;

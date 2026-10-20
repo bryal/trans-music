@@ -19,11 +19,10 @@ pub struct Job {
 }
 
 pub struct Plan {
-    /// Every extension seen under `src`, for the user's information.
+    /// Every extension seen under `src`.
     pub all_exts: BTreeSet<String>,
-    /// Audio files that are up to date and will be skipped.
+    /// Audio files whose output is up to date.
     pub skipped: Vec<Job>,
-    /// Audio files to transcode.
     pub todo: Vec<Job>,
     /// Files under `dst` with no corresponding source file.
     pub orphans: Vec<PathBuf>,
@@ -44,7 +43,7 @@ pub fn plan(src_root: &Path, dst_root: &Path, force: bool) -> io::Result<Plan> {
     // Each walk skips the other root: a DST inside SRC is not read as input,
     // and a SRC inside DST is not pruned.
     for rel in walk(src_root, true, dst_canon.as_deref())? {
-        let ext = extension(&rel);
+        let ext = rel.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
         all_exts.insert(ext.clone());
         if !AUDIO_EXTS.contains(&ext.as_str()) {
             continue;
@@ -74,19 +73,12 @@ pub fn plan(src_root: &Path, dst_root: &Path, force: bool) -> io::Result<Plan> {
     Ok(Plan { all_exts, skipped, todo, orphans, conflicts })
 }
 
-/// Transcode when the output is missing or older than the source. An
-/// unreadable source is attempted so that the error gets reported.
+/// True unless the output exists and is at least as new as the source.
 fn needs_transcode(job: &Job) -> bool {
     let Ok(dst_time) = fs::metadata(&job.dst).and_then(|m| m.modified()) else {
         return true;
     };
     fs::metadata(&job.src).and_then(|m| m.modified()).ok().is_none_or(|src_time| dst_time < src_time)
-}
-
-fn extension(path: &Path) -> String {
-    path.extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default()
 }
 
 /// All files under `root`, as paths relative to `root`, sorted, leaving out
