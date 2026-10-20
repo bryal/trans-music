@@ -59,6 +59,10 @@ fn main() {
         exit(0)
     }
     let opts = flags::TransMusic::from_env_or_exit();
+    if !(6..=510).contains(&opts.bitrate) {
+        eprintln!("error: --bitrate is in kbit/s and must be between 6 and 510");
+        exit(2)
+    }
     let settings = Settings {
         src: opts.src,
         dst: opts.dst,
