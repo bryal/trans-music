@@ -8,7 +8,6 @@ use crate::decode::AudioReader;
 use crate::encode::{self, OggOpusWriter, RATE};
 use crate::loudness::{Gain, Meter};
 use crate::resample::Resampler;
-use opusic_c::Channels;
 
 pub type Result<T> = encode::Result<T>;
 
@@ -32,7 +31,6 @@ pub struct Report {
 
 pub fn transcode(src: &Path, dst: &Path, settings: &Settings) -> Result<Report> {
     let mut reader = AudioReader::open(src)?;
-    let channels = encode::channels(reader.channels)?;
     let gain = settings.target.map(|t| measure(src, t)).transpose()?;
     let linear = gain.map_or(1.0, |g| g.linear());
 
@@ -42,7 +40,7 @@ pub fn transcode(src: &Path, dst: &Path, settings: &Settings) -> Result<Report> 
     // Write next to the destination, rename when complete, so an interrupted
     // run never leaves a truncated file that looks up to date.
     let tmp = dst.with_extension("opus.part");
-    let result = encode_into(&tmp, &mut reader, channels, linear, settings)
+    let result = encode_into(&tmp, &mut reader, linear, settings)
         .and_then(|()| encode::copy_tags(src, &tmp, settings.keep_art))
         .and_then(|warning| fs::rename(&tmp, dst).map(|()| warning).map_err(Into::into));
     match result {
@@ -56,15 +54,15 @@ pub fn transcode(src: &Path, dst: &Path, settings: &Settings) -> Result<Report> 
 
 fn measure(src: &Path, target: Target) -> Result<Gain> {
     let mut reader = AudioReader::open(src)?;
-    let mut meter = Meter::new(reader.channels, reader.rate)?;
+    let mut meter = Meter::new(reader.channels as usize, reader.rate)?;
     while let Some(chunk) = reader.next_chunk()? {
         meter.add(chunk)?;
     }
     Ok(meter.gain_to(target.loudness_lufs, target.true_peak_dbtp)?)
 }
 
-fn encode_into(tmp: &Path, reader: &mut AudioReader, channels: Channels, linear: f32, settings: &Settings) -> Result<()> {
-    let rate = reader.rate;
+fn encode_into(tmp: &Path, reader: &mut AudioReader, linear: f32, settings: &Settings) -> Result<()> {
+    let (rate, channels) = (reader.rate, reader.channels);
     let mut writer = OggOpusWriter::new(BufWriter::new(File::create(tmp)?), channels, rate, settings.bitrate_kbps)?;
     let mut resampler = (rate != RATE).then(|| Resampler::new(rate, RATE, channels as usize)).transpose()?;
     let mut scaled = Vec::new();
@@ -134,7 +132,7 @@ mod tests {
         assert_eq!(report.warning, None);
 
         let mut reader = AudioReader::open(&dst).unwrap();
-        assert_eq!((reader.rate, reader.channels), (RATE, 2));
+        assert_eq!((reader.rate, reader.channels as usize), (RATE, 2));
         let mut meter = Meter::new(2, RATE).unwrap();
         let mut out = Vec::new();
         while let Some(chunk) = reader.next_chunk().unwrap() {

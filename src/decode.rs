@@ -1,181 +1,92 @@
-//! Decode any supported audio file to interleaved f32 via symphonia, with
-//! libopus registered as its Opus decoder.
+//! Decode any supported audio file to interleaved f32: symphonia for
+//! everything but Opus, which it lacks, and libopus for Opus.
 
 use std::fs::File;
 use std::path::Path;
-use std::sync::{LazyLock, Mutex};
 
-use symphonia::core::audio::{Audio, AudioBuffer, AudioMut, AudioSpec};
+use opusic_c::Channels;
+use symphonia::core::codecs::audio::AudioDecoder;
 use symphonia::core::codecs::audio::well_known::CODEC_ID_OPUS;
-use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions, FinalizeResult};
-use symphonia::core::codecs::registry::{CodecRegistry, RegisterableAudioDecoder, SupportedAudioCodec};
-use symphonia::core::codecs::CodecInfo;
 use symphonia::core::errors::Error;
-use symphonia::core::formats::probe::{Hint, Probe};
-use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::formats::{FormatReader, TrackType};
 use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
-use symphonia::core::packet::PacketRef;
-use symphonia_core::audio::{AsGenericAudioBufferRef, GenericAudioBufferRef};
-use symphonia_core::support_audio_codec;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-static CODECS: LazyLock<CodecRegistry> = LazyLock::new(|| {
-    let mut r = CodecRegistry::new();
-    symphonia::default::register_enabled_codecs(&mut r);
-    r.register_audio_decoder::<OpusDecoder>();
-    r
-});
+/// Opus allows up to 120 ms per packet.
+const MAX_OPUS_FRAMES: usize = 5760;
 
-static PROBE: LazyLock<Probe> = LazyLock::new(|| {
-    let mut p = Probe::default();
-    symphonia::default::register_enabled_formats(&mut p);
-    p
-});
+enum Decoder {
+    Symphonia(Box<dyn AudioDecoder>),
+    /// `skip` counts the OpusHead pre-skip frames still to drop; the
+    /// demuxer trims only the end padding.
+    Opus { dec: opusic_c::Decoder, skip: usize },
+}
 
 /// A decoding session over one file, yielding interleaved f32 chunks.
 pub struct AudioReader {
     format: Box<dyn FormatReader>,
-    decoder: Box<dyn AudioDecoder>,
+    decoder: Decoder,
     track_id: u32,
     pub rate: u32,
-    pub channels: usize,
+    pub channels: Channels,
     chunk: Vec<f32>,
 }
 
 impl AudioReader {
+    /// Opens `path` for decoding. Only mono and stereo are supported.
     pub fn open(path: &Path) -> Result<Self> {
-        let file = File::open(path)?;
-        let mss = MediaSourceStream::new(Box::new(file), Default::default());
-        let format = PROBE.probe(&Hint::new(), mss, FormatOptions::default(), MetadataOptions::default())?;
-        let track = format
-            .default_track(TrackType::Audio)
-            .ok_or(Error::Unsupported("no audio track"))?;
-        let params = track
-            .codec_params
-            .as_ref()
-            .and_then(|p| p.audio())
-            .ok_or(Error::Unsupported("no audio codec parameters"))?;
+        let mss = MediaSourceStream::new(Box::new(File::open(path)?), Default::default());
+        let format = symphonia::default::get_probe().probe(&Hint::new(), mss, Default::default(), Default::default())?;
+        let track = format.default_track(TrackType::Audio).ok_or(Error::Unsupported("no audio track"))?;
+        let params = track.codec_params.as_ref().and_then(|p| p.audio()).ok_or(Error::Unsupported("no audio track"))?;
         let rate = params.sample_rate.ok_or(Error::Unsupported("unknown sample rate"))?;
-        let channels = params
-            .channels
-            .as_ref()
-            .map(|c| c.count())
-            .ok_or(Error::Unsupported("unknown channel count"))?;
-        let decoder = CODECS.make_audio_decoder(params, &AudioDecoderOptions::default())?;
+        let channels = match params.channels.as_ref().map(|c| c.count()) {
+            Some(1) => Channels::Mono,
+            Some(2) => Channels::Stereo,
+            _ => return Err(Error::Unsupported("only mono and stereo are supported")),
+        };
+        let decoder = if params.codec == CODEC_ID_OPUS {
+            // OpusHead is little-endian. MP4's dOps, which symphonia passes on
+            // behind an "OpusHead" prefix, is big-endian with version 0.
+            let skip = match params.extra_data.as_deref().and_then(|head| head.get(8..12)) {
+                Some(&[0, _, hi, lo]) => u16::from_be_bytes([hi, lo]),
+                Some(&[_, _, lo, hi]) => u16::from_le_bytes([lo, hi]),
+                _ => 0,
+            };
+            let dec = opusic_c::Decoder::new(channels, opusic_c::SampleRate::Hz48000)
+                .map_err(|e| Error::Unsupported(e.message()))?;
+            Decoder::Opus { dec, skip: skip.into() }
+        } else {
+            Decoder::Symphonia(symphonia::default::get_codecs().make_audio_decoder(params, &Default::default())?)
+        };
         Ok(Self { track_id: track.id, format, decoder, rate, channels, chunk: Vec::new() })
     }
 
     /// The next decoded chunk, or `None` at end of stream.
     pub fn next_chunk(&mut self) -> Result<Option<&[f32]>> {
+        let ch = self.channels as usize;
         loop {
-            let packet = match self.format.next_packet() {
-                Ok(Some(p)) => p,
-                Ok(None) => return Ok(None),
-                // A clean end of stream is `Ok(None)`; hitting EOF inside a
-                // packet means the file is truncated.
-                Err(Error::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    return Err(Error::DecodeError("file is truncated"));
-                }
-                Err(e) => return Err(e),
-            };
+            let Some(packet) = self.format.next_packet()? else { return Ok(None) };
             if packet.track_id != self.track_id {
                 continue;
             }
-            match self.decoder.decode(&packet) {
-                Ok(buf) => {
-                    self.chunk.clear();
-                    buf.copy_to_vec_interleaved(&mut self.chunk);
-                    return Ok(Some(&self.chunk));
+            match &mut self.decoder {
+                Decoder::Symphonia(dec) => dec.decode(&packet)?.copy_to_vec_interleaved(&mut self.chunk),
+                Decoder::Opus { dec, skip } => {
+                    self.chunk.resize(MAX_OPUS_FRAMES * ch, 0.0);
+                    let frames = dec
+                        .decode_float_to_slice(&packet.data, &mut self.chunk, false)
+                        .map_err(|e| Error::DecodeError(e.message()))?;
+                    let head = (*skip).min(frames);
+                    *skip -= head;
+                    let tail = frames.saturating_sub(packet.trim_end.get() as usize).max(head);
+                    self.chunk.truncate(tail * ch);
+                    self.chunk.drain(..head * ch);
                 }
-                // A corrupt packet is skipped, like most players do.
-                Err(Error::DecodeError(_)) => continue,
-                Err(e) => return Err(e),
             }
+            return Ok(Some(&self.chunk));
         }
-    }
-}
-
-/// libopus wrapped as a symphonia decoder. Only channel mapping family 0
-/// (mono and stereo) is supported, which covers music libraries.
-struct OpusDecoder {
-    /// Behind a mutex only because symphonia wants decoders to be `Sync`.
-    inner: Mutex<opusic_c::Decoder>,
-    params: AudioCodecParameters,
-    pcm: Vec<f32>,
-    buf: AudioBuffer<f32>,
-    /// Pre-skip frames from OpusHead still to drop. The Ogg demuxer trims
-    /// end padding but leaves pre-skip to the decoder.
-    skip: usize,
-}
-
-/// Opus allows up to 120 ms per packet.
-const MAX_FRAMES: usize = 5760;
-
-impl RegisterableAudioDecoder for OpusDecoder {
-    fn try_registry_new(params: &AudioCodecParameters, _opts: &AudioDecoderOptions) -> Result<Box<dyn AudioDecoder>> {
-        let channels = params.channels.clone().ok_or(Error::Unsupported("opus: unknown channels"))?;
-        let n = channels.count();
-        let layout = crate::encode::channels(n).map_err(|_| Error::Unsupported("opus: only mono and stereo"))?;
-        let inner = opusic_c::Decoder::new(layout, opusic_c::SampleRate::Hz48000)
-            .map_err(|_| Error::Unsupported("opus: decoder init failed"))?;
-        let buf = AudioBuffer::new(AudioSpec::new(48_000, channels), MAX_FRAMES);
-        let skip = match params.extra_data.as_deref() {
-            Some(head) if head.len() >= 12 && head.starts_with(b"OpusHead") => {
-                u16::from_le_bytes([head[10], head[11]]) as usize
-            }
-            _ => 0,
-        };
-        Ok(Box::new(Self {
-            inner: Mutex::new(inner),
-            params: params.clone(),
-            pcm: vec![0.0; MAX_FRAMES * n],
-            buf,
-            skip,
-        }))
-    }
-
-    fn supported_codecs() -> &'static [SupportedAudioCodec] {
-        &[support_audio_codec!(CODEC_ID_OPUS, "opus", "Opus (libopus)")]
-    }
-}
-
-impl AudioDecoder for OpusDecoder {
-    fn reset(&mut self) {
-        let _ = self.inner.get_mut().unwrap().reset();
-    }
-
-    fn codec_info(&self) -> &CodecInfo {
-        &Self::supported_codecs()[0].info
-    }
-
-    fn codec_params(&self) -> &AudioCodecParameters {
-        &self.params
-    }
-
-    fn decode_ref(&mut self, packet: &PacketRef<'_>) -> Result<GenericAudioBufferRef<'_>> {
-        let frames = self
-            .inner
-            .get_mut()
-            .unwrap()
-            .decode_float_to_slice(packet.data, &mut self.pcm, false)
-            .map_err(|_| Error::DecodeError("opus: invalid packet"))?;
-        self.buf.clear();
-        self.buf.render_uninit(Some(frames));
-        let n = self.buf.spec().channels().count();
-        self.buf.copy_from_slice_interleaved(&&self.pcm[..frames * n]);
-        let skip = self.skip.min(frames);
-        self.skip -= skip;
-        self.buf.trim(packet.trim_start.get() as usize + skip, packet.trim_end.get() as usize);
-        Ok(self.buf.as_generic_audio_buffer_ref())
-    }
-
-    fn finalize(&mut self) -> FinalizeResult {
-        FinalizeResult::default()
-    }
-
-    fn last_decoded(&self) -> GenericAudioBufferRef<'_> {
-        self.buf.as_generic_audio_buffer_ref()
     }
 }

@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 symphonia = { version = "0.6", default-features = false, features = ["aac", "alac", "flac", "isomp4", "mkv", "mp3", "ogg", "pcm", "vorbis", "wav", "all-meta", "opt-simd"] }
-symphonia-core = "0.6"
 ebur128 = "0.1"
 rubato = "5"
 ogg = "0.9"

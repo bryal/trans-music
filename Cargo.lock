@@ -581,7 +581,6 @@ dependencies = [
  "opusic-c",
  "rubato",
  "symphonia",
- "symphonia-core",
  "xflags",
 ]
 

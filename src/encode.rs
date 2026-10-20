@@ -28,14 +28,6 @@ fn opus<T>(r: std::result::Result<T, opusic_c::ErrorCode>) -> Result<T> {
     r.map_err(|e| format!("opus: {e:?}").into())
 }
 
-pub fn channels(n: usize) -> Result<Channels> {
-    match n {
-        1 => Ok(Channels::Mono),
-        2 => Ok(Channels::Stereo),
-        _ => Err(format!("{n} channels; only mono and stereo are supported").into()),
-    }
-}
-
 fn new_encoder(channels: Channels, bitrate_kbps: u32) -> Result<Encoder> {
     let mut enc = opus(Encoder::new(channels, SampleRate::Hz48000, Application::Audio))?;
     opus(enc.set_bitrate(Bitrate::Value(bitrate_kbps * 1000)))?;
