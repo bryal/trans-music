@@ -1,3 +1,6 @@
+mod cli;
+
 fn main() {
-    println!("Hello, world!");
+    let opts = cli::parse();
+    println!("{opts:#?}");
 }
