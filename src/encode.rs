@@ -133,9 +133,9 @@ const GAIN_TAGS: [&str; 6] = [
     "R128_ALBUM_GAIN",
 ];
 
-/// The tags of `src` as Vorbis comments, minus ReplayGain and R128 gains.
-/// FLAC and Ogg sources are copied field for field; other formats go
-/// through lofty's generic mapping, which drops fields it has no name for.
+/// The tags of `src` as Vorbis comments. FLAC and Ogg sources are copied
+/// field for field; other formats go through lofty's generic mapping, which
+/// drops fields it has no name for.
 pub fn read_tags(src: &Path, keep_art: bool) -> Result<VorbisComments> {
     let probe = Probe::open(src)?.guess_file_type()?;
     let mut tags = match probe.file_type() {
@@ -156,11 +156,15 @@ pub fn read_tags(src: &Path, keep_art: bool) -> Result<VorbisComments> {
             tagged.primary_tag().or(tagged.first_tag()).cloned().map(VorbisComments::from).unwrap_or_default()
         }
     };
-    for key in GAIN_TAGS {
-        tags.remove(key).for_each(drop);
-    }
     if !keep_art {
         tags.remove_pictures();
     }
     Ok(tags)
+}
+
+/// Removes ReplayGain and R128 gains, which don't apply to normalized audio.
+pub fn remove_gain_tags(tags: &mut VorbisComments) {
+    for key in GAIN_TAGS {
+        tags.remove(key).for_each(drop);
+    }
 }

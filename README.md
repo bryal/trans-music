@@ -27,7 +27,7 @@ bitrate (required), loudness target, true-peak ceiling, thread count, `--prune`,
    (VBR, complexity 10, music signal hint), mux into Ogg.
 4. Copy tags. FLAC and Ogg sources keep their Vorbis comments verbatim;
    ID3 and MP4 tags go through `lofty`'s mapping. ReplayGain and R128 gain
-   tags are dropped because the audio is already normalized.
+   tags are dropped when normalizing, since they no longer apply.
 
 Input: flac, mp3, aac/alac in m4a/mp4, vorbis/opus in ogg/oga/opus, wav,
 mka. Mono and stereo only.
