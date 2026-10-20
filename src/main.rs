@@ -6,7 +6,6 @@ mod resample;
 mod scan;
 mod transcode;
 
-use std::io::Write;
 use std::process::exit;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -14,15 +13,6 @@ use std::time::Instant;
 
 use cli::Verbosity;
 use transcode::{Settings, Target};
-
-/// `println!` that exits quietly when stdout is closed early, e.g. `| head`.
-macro_rules! out {
-    ($($arg:tt)*) => {
-        if writeln!(std::io::stdout(), $($arg)*).is_err() {
-            std::process::exit(0)
-        }
-    };
-}
 
 fn main() {
     let opts = cli::parse();
@@ -38,8 +28,8 @@ fn main() {
 
     if !quiet {
         let exts: Vec<_> = plan.all_exts.iter().map(String::as_str).collect();
-        out!("extensions in source: {}", exts.join(" "));
-        out!(
+        println!("extensions in source: {}", exts.join(" "));
+        println!(
             "{} audio files, {} up to date, {} to transcode, {} orphans in destination",
             plan.skipped.len() + plan.todo.len(),
             plan.skipped.len(),
@@ -52,16 +42,16 @@ fn main() {
     }
     if verbose {
         for job in &plan.skipped {
-            out!("= {}", job.rel.display());
+            println!("= {}", job.rel.display());
         }
     }
     if opts.dry_run {
         for job in &plan.todo {
-            out!("+ {}", job.rel.display());
+            println!("+ {}", job.rel.display());
         }
         if opts.prune {
             for p in &plan.orphans {
-                out!("- {}", p.display());
+                println!("- {}", p.display());
             }
         }
         return;
@@ -87,7 +77,7 @@ fn main() {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(job) = plan.todo.get(i) else { break };
                     if !quiet {
-                        out!("[{}/{total}] + {}", i + 1, job.rel.display());
+                        println!("[{}/{total}] + {}", i + 1, job.rel.display());
                     }
                     match transcode::transcode(&job.src, &job.dst, &settings) {
                         Ok(report) => {
@@ -102,7 +92,7 @@ fn main() {
                                         g.db
                                     );
                                 } else if verbose {
-                                    out!("  {}: gain {:+.1} dB", job.rel.display(), g.db);
+                                    println!("  {}: gain {:+.1} dB", job.rel.display(), g.db);
                                 }
                             }
                         }
@@ -120,7 +110,7 @@ fn main() {
     if opts.prune {
         for p in &plan.orphans {
             if !quiet {
-                out!("- {}", p.display());
+                println!("- {}", p.display());
             }
             if let Err(e) = std::fs::remove_file(p) {
                 eprintln!("error: removing {}: {e}", p.display());
@@ -129,7 +119,7 @@ fn main() {
         scan::remove_empty_dirs(&opts.dst);
     }
     if !quiet {
-        out!(
+        println!(
             "done: {} transcoded, {} failed, {:.0?}",
             total - failures.len(),
             failures.len(),
