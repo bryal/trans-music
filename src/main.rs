@@ -15,6 +15,9 @@ use cli::Verbosity;
 use transcode::{Settings, Target};
 
 fn main() {
+    // Die quietly when stdout is closed early, e.g. piped into `head`.
+    // SAFETY: plain signal disposition change before any threads exist.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     let opts = cli::parse();
     let plan = match scan::plan(&opts.src, &opts.dst, opts.force) {
         Ok(p) => p,
