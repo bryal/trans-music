@@ -55,12 +55,12 @@ impl AudioReader {
         let format = PROBE.probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())?;
         let track = format
             .default_track(TrackType::Audio)
-            .ok_or_else(|| Error::Unsupported("no audio track"))?;
+            .ok_or(Error::Unsupported("no audio track"))?;
         let params = track
             .codec_params
             .as_ref()
             .and_then(|p| p.audio())
-            .ok_or_else(|| Error::Unsupported("no audio codec parameters"))?;
+            .ok_or(Error::Unsupported("no audio codec parameters"))?;
         let rate = params.sample_rate.ok_or(Error::Unsupported("unknown sample rate"))?;
         let channels = params
             .channels
