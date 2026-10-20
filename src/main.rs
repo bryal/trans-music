@@ -55,7 +55,7 @@ mod flags {
 const VERSION: &str = concat!(
     "trans-music ",
     env!("CARGO_PKG_VERSION"),
-    "\nCopyright (C) 2026 ",
+    "\nCopyright (C) 2026  ",
     env!("CARGO_PKG_AUTHORS"),
     "\nLicense GPLv3: GNU GPL version 3 <https://gnu.org/licenses/gpl.html>.",
     "\nThis is free software: you are free to change and redistribute it.",
