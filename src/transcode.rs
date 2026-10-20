@@ -6,33 +6,32 @@ use std::path::Path;
 
 use crate::decode::AudioReader;
 use crate::encode::{self, OggOpusWriter, RATE};
-use crate::loudness::{Gain, Meter};
+use crate::loudness::{self, Gain};
 use crate::resample::Resampler;
+use crate::scan::Job;
 
 pub type Result<T> = encode::Result<T>;
 
 pub struct Settings {
     pub bitrate_kbps: u32,
-    /// `None` disables normalization.
-    pub target: Option<Target>,
+    pub normalize: bool,
+    pub loudness_lufs: f64,
+    pub true_peak_dbtp: f64,
     pub keep_art: bool,
 }
 
-#[derive(Clone, Copy)]
-pub struct Target {
-    pub loudness_lufs: f64,
-    pub true_peak_dbtp: f64,
-}
-
-pub struct Report {
-    pub gain: Option<Gain>,
-    pub warning: Option<String>,
-}
-
-pub fn transcode(src: &Path, dst: &Path, settings: &Settings) -> Result<Report> {
+/// Transcodes one file, printing warnings to stderr.
+pub fn transcode(job: &Job, settings: &Settings) -> Result<()> {
+    let (src, dst) = (&job.src, &job.dst);
     let mut reader = AudioReader::open(src)?;
-    let gain = settings.target.map(|t| measure(src, t)).transpose()?;
-    let linear = gain.map_or(1.0, |g| g.linear());
+    let mut linear = 1.0;
+    if settings.normalize {
+        let gain = measure(src, settings)?;
+        if gain.limited {
+            eprintln!("warning: {}: gain capped at {:+.1} dB by the true-peak ceiling", job.rel.display(), gain.db);
+        }
+        linear = gain.linear();
+    }
 
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)?;
@@ -42,23 +41,25 @@ pub fn transcode(src: &Path, dst: &Path, settings: &Settings) -> Result<Report> 
     let tmp = dst.with_extension("opus.part");
     let result = encode_into(&tmp, &mut reader, linear, settings)
         .and_then(|()| encode::copy_tags(src, &tmp, settings.keep_art))
-        .and_then(|warning| fs::rename(&tmp, dst).map(|()| warning).map_err(Into::into));
-    match result {
-        Ok(warning) => Ok(Report { gain, warning }),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
+        .and_then(|warning| {
+            if let Some(w) = warning {
+                eprintln!("warning: {}: {w}", job.rel.display());
+            }
+            Ok(fs::rename(&tmp, dst)?)
+        });
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
     }
+    result
 }
 
-fn measure(src: &Path, target: Target) -> Result<Gain> {
+fn measure(src: &Path, settings: &Settings) -> Result<Gain> {
     let mut reader = AudioReader::open(src)?;
-    let mut meter = Meter::new(reader.channels as usize, reader.rate)?;
+    let mut meter = loudness::meter(reader.channels as usize, reader.rate)?;
     while let Some(chunk) = reader.next_chunk()? {
-        meter.add(chunk)?;
+        meter.add_frames_f32(chunk)?;
     }
-    Ok(meter.gain_to(target.loudness_lufs, target.true_peak_dbtp)?)
+    Ok(loudness::gain_to(&meter, settings.loudness_lufs, settings.true_peak_dbtp)?)
 }
 
 fn encode_into(tmp: &Path, reader: &mut AudioReader, linear: f32, settings: &Settings) -> Result<()> {
@@ -84,7 +85,6 @@ fn encode_into(tmp: &Path, reader: &mut AudioReader, linear: f32, settings: &Set
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::loudness::Meter;
 
     fn write_wav(path: &Path, rate: u32, channels: u16, frames: usize) {
         let data_len = frames * channels as usize * 2;
@@ -118,32 +118,26 @@ mod tests {
     fn wav_round_trip() {
         let dir = std::env::temp_dir().join(format!("trans-music-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        let src = dir.join("tone.wav");
-        let dst = dir.join("out").join("tone.opus");
+        let job = Job { rel: "tone.wav".into(), src: dir.join("tone.wav"), dst: dir.join("out").join("tone.opus") };
         let frames_in = 44_100 * 3 + 123;
-        write_wav(&src, 44_100, 2, frames_in);
-        let settings = Settings {
-            bitrate_kbps: 96,
-            target: Some(Target { loudness_lufs: -16.0, true_peak_dbtp: -2.0 }),
-            keep_art: true,
-        };
-        let report = transcode(&src, &dst, &settings).unwrap();
-        assert!(report.gain.unwrap().db > 0.0);
-        assert_eq!(report.warning, None);
+        write_wav(&job.src, 44_100, 2, frames_in);
+        let settings =
+            Settings { bitrate_kbps: 96, normalize: true, loudness_lufs: -16.0, true_peak_dbtp: -2.0, keep_art: true };
+        transcode(&job, &settings).unwrap();
 
-        let mut reader = AudioReader::open(&dst).unwrap();
+        let mut reader = AudioReader::open(&job.dst).unwrap();
         assert_eq!((reader.rate, reader.channels as usize), (RATE, 2));
-        let mut meter = Meter::new(2, RATE).unwrap();
+        let mut meter = loudness::meter(2, RATE).unwrap();
         let mut out = Vec::new();
         while let Some(chunk) = reader.next_chunk().unwrap() {
-            meter.add(chunk).unwrap();
+            meter.add_frames_f32(chunk).unwrap();
             out.extend_from_slice(chunk);
         }
         let expected = (frames_in as u64 * RATE as u64).div_ceil(44_100) as usize;
         assert_eq!(out.len() / 2, expected);
         let lead_peak = out[..2 * 47_000].iter().fold(0f32, |m, v| m.max(v.abs()));
         assert!(lead_peak < 0.01, "leading silence peak {lead_peak}");
-        let off_by = meter.gain_to(-16.0, f64::INFINITY).unwrap().db;
+        let off_by = loudness::gain_to(&meter, -16.0, f64::INFINITY).unwrap().db;
         assert!(off_by.abs() < 0.5, "{off_by} dB off -16 LUFS");
         fs::remove_dir_all(&dir).unwrap();
     }

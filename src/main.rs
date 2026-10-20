@@ -11,7 +11,7 @@ use std::process::exit;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use transcode::{Settings, Target};
+use transcode::Settings;
 
 fn main() {
     let opts = cli::parse();
@@ -58,10 +58,9 @@ fn main() {
 
     let settings = Settings {
         bitrate_kbps: opts.bitrate,
-        target: (!opts.no_normalize).then(|| Target {
-            loudness_lufs: opts.loudness.unwrap_or(-16.0),
-            true_peak_dbtp: opts.true_peak.unwrap_or(-2.0),
-        }),
+        normalize: !opts.no_normalize,
+        loudness_lufs: opts.loudness.unwrap_or(-16.0),
+        true_peak_dbtp: opts.true_peak.unwrap_or(-2.0),
         keep_art: !opts.strip_art,
     };
     let jobs = opts.jobs.or(std::thread::available_parallelism().ok()).map_or(1, NonZeroUsize::get);
@@ -79,27 +78,9 @@ fn main() {
                     if !quiet {
                         println!("[{}/{total}] + {}", i + 1, job.rel.display());
                     }
-                    match transcode::transcode(&job.src, &job.dst, &settings) {
-                        Ok(report) => {
-                            if let Some(w) = report.warning {
-                                eprintln!("warning: {}: {w}", job.rel.display());
-                            }
-                            if let Some(g) = report.gain {
-                                if g.limited {
-                                    eprintln!(
-                                        "warning: {}: gain capped at {:+.1} dB by the true-peak ceiling",
-                                        job.rel.display(),
-                                        g.db
-                                    );
-                                } else if verbose {
-                                    println!("  {}: gain {:+.1} dB", job.rel.display(), g.db);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("error: {}: {e}", job.rel.display());
-                            failures.fetch_add(1, Ordering::Relaxed);
-                        }
+                    if let Err(e) = transcode::transcode(job, &settings) {
+                        eprintln!("error: {}: {e}", job.rel.display());
+                        failures.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             });
