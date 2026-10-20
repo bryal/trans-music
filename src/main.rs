@@ -135,6 +135,7 @@ fn main() {
     });
 
     let failures = failures.into_inner();
+    let mut ok = failures == 0;
     if opts.prune {
         for p in &plan.orphans {
             if !quiet {
@@ -142,6 +143,7 @@ fn main() {
             }
             if let Err(e) = std::fs::remove_file(p) {
                 eprintln!("error: removing {p:?}: {e}");
+                ok = false;
             }
         }
         scan::remove_empty_dirs(&settings.dst);
@@ -149,7 +151,7 @@ fn main() {
     if !quiet {
         println!("done: {} transcoded, {} failed, {:.0?}", total - failures, failures, started.elapsed());
     }
-    if failures > 0 {
+    if !ok {
         exit(1)
     }
 }
