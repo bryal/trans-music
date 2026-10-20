@@ -1,9 +1,9 @@
-//! Command line parsing. The `xflags!` grammar generates `flags::TransMusic`.
+//! Command line grammar; `xflags!` generates `TransMusic` from it.
 
-use std::path::PathBuf;
 use std::process::exit;
 
 mod flags {
+    use std::num::NonZeroUsize;
     use std::path::PathBuf;
 
     xflags::xflags! {
@@ -25,7 +25,7 @@ mod flags {
             /// Skip loudness normalization
             optional -N,--no-normalize
             /// Files transcoded in parallel [default: CPU count]
-            optional -j,--jobs n: usize
+            optional -j,--jobs n: NonZeroUsize
             /// Re-transcode even if the output is up to date
             optional -f,--force
             /// List what would be done, change nothing
@@ -40,69 +40,21 @@ mod flags {
             optional -v,--verbose
         }
     }
-
 }
 
-#[derive(Debug, Clone)]
-pub struct Opts {
-    pub src: PathBuf,
-    pub dst: PathBuf,
-    pub bitrate_kbps: u32,
-    pub loudness_lufs: f64,
-    pub true_peak_dbtp: f64,
-    pub normalize: bool,
-    pub jobs: usize,
-    pub force: bool,
-    pub dry_run: bool,
-    pub prune: bool,
-    pub strip_art: bool,
-    pub verbosity: Verbosity,
-}
+pub use flags::TransMusic;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Verbosity {
-    Quiet,
-    Normal,
-    Verbose,
-}
-
-/// Parses the command line, applying defaults and range checks. Exits with
-/// a message on bad usage.
-pub fn parse() -> Opts {
-    // Checked before parsing so it works without the required paths.
+/// Parses the command line. Exits with a message on bad usage.
+pub fn parse() -> TransMusic {
+    // Checked before parsing so it works without the required arguments.
     if std::env::args_os().skip(1).any(|a| a == "-V" || a == "--version") {
         println!("trans-music {}", env!("CARGO_PKG_VERSION"));
         exit(0)
     }
-    let f = flags::TransMusic::from_env_or_exit();
-    if !(6..=510).contains(&f.bitrate) {
-        usage_error("--bitrate must be between 6 and 510 kbit/s");
+    let flags = TransMusic::from_env_or_exit();
+    if !(6..=510).contains(&flags.bitrate) {
+        eprintln!("error: --bitrate must be between 6 and 510 kbit/s");
+        exit(2)
     }
-    let jobs = f.jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
-    if jobs == 0 {
-        usage_error("--jobs must be positive");
-    }
-    Opts {
-        src: f.src,
-        dst: f.dst,
-        bitrate_kbps: f.bitrate,
-        loudness_lufs: f.loudness.unwrap_or(-16.0),
-        true_peak_dbtp: f.true_peak.unwrap_or(-2.0),
-        normalize: !f.no_normalize,
-        jobs,
-        force: f.force,
-        dry_run: f.dry_run,
-        prune: f.prune,
-        strip_art: f.strip_art,
-        verbosity: match (f.quiet, f.verbose) {
-            (true, _) => Verbosity::Quiet,
-            (_, true) => Verbosity::Verbose,
-            _ => Verbosity::Normal,
-        },
-    }
-}
-
-fn usage_error(msg: &str) -> ! {
-    eprintln!("error: {msg}");
-    exit(2)
+    flags
 }

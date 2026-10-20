@@ -6,12 +6,11 @@ mod resample;
 mod scan;
 mod transcode;
 
+use std::num::NonZeroUsize;
 use std::process::exit;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use cli::Verbosity;
 use transcode::{Settings, Target};
 
 fn main() {
@@ -23,8 +22,8 @@ fn main() {
             exit(1)
         }
     };
-    let quiet = opts.verbosity == Verbosity::Quiet;
-    let verbose = opts.verbosity == Verbosity::Verbose;
+    let quiet = opts.quiet;
+    let verbose = opts.verbose && !quiet;
 
     if !quiet {
         let exts: Vec<_> = plan.all_exts.iter().map(String::as_str).collect();
@@ -58,20 +57,21 @@ fn main() {
     }
 
     let settings = Settings {
-        bitrate_kbps: opts.bitrate_kbps,
-        target: opts.normalize.then_some(Target {
-            loudness_lufs: opts.loudness_lufs,
-            true_peak_dbtp: opts.true_peak_dbtp,
+        bitrate_kbps: opts.bitrate,
+        target: (!opts.no_normalize).then(|| Target {
+            loudness_lufs: opts.loudness.unwrap_or(-16.0),
+            true_peak_dbtp: opts.true_peak.unwrap_or(-2.0),
         }),
         keep_art: !opts.strip_art,
     };
+    let jobs = opts.jobs.or(std::thread::available_parallelism().ok()).map_or(1, NonZeroUsize::get);
     let total = plan.todo.len();
     let next = AtomicUsize::new(0);
-    let failures = Mutex::new(Vec::new());
+    let failures = AtomicUsize::new(0);
     let started = Instant::now();
 
     std::thread::scope(|scope| {
-        for _ in 0..opts.jobs.min(total.max(1)) {
+        for _ in 0..jobs.min(total) {
             scope.spawn(|| {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
@@ -98,7 +98,7 @@ fn main() {
                         }
                         Err(e) => {
                             eprintln!("error: {}: {e}", job.rel.display());
-                            failures.lock().unwrap().push(job.rel.clone());
+                            failures.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 }
@@ -106,7 +106,7 @@ fn main() {
         }
     });
 
-    let failures = failures.into_inner().unwrap();
+    let failures = failures.into_inner();
     if opts.prune {
         for p in &plan.orphans {
             if !quiet {
@@ -121,12 +121,12 @@ fn main() {
     if !quiet {
         println!(
             "done: {} transcoded, {} failed, {:.0?}",
-            total - failures.len(),
-            failures.len(),
+            total - failures,
+            failures,
             started.elapsed()
         );
     }
-    if !failures.is_empty() {
+    if failures > 0 {
         exit(1)
     }
 }
