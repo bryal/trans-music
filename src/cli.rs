@@ -70,7 +70,7 @@ pub enum Verbosity {
 /// a message on bad usage.
 pub fn parse() -> Opts {
     // Checked before parsing so it works without the required paths.
-    if std::env::args().skip(1).any(|a| a == "-V" || a == "--version") {
+    if std::env::args_os().skip(1).any(|a| a == "-V" || a == "--version") {
         println!("trans-music {}", env!("CARGO_PKG_VERSION"));
         exit(0)
     }
