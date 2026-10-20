@@ -56,11 +56,9 @@ pub fn transcode(job: &Path, settings: &Settings) -> Result<()> {
     // Write next to the destination, rename when complete, so an interrupted
     // run never leaves a truncated file that looks up to date.
     let tmp = dst.with_extension("opus.part");
-    let result = encode_into(&tmp, &mut reader, linear, tags, settings).and_then(|()| Ok(fs::rename(&tmp, &dst)?));
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
+    encode_into(&tmp, &mut reader, linear, tags, settings).and_then(|()| Ok(fs::rename(&tmp, &dst)?)).inspect_err(|_| {
+        fs::remove_file(&tmp).ok();
+    })
 }
 
 fn measure(src: &Path, target: &loudness::Target) -> Result<Gain> {
