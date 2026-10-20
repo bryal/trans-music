@@ -11,7 +11,6 @@ pub const AUDIO_EXTS: &[&str] = &[
 ];
 
 /// One source file and where its transcode goes.
-#[derive(Debug, Clone)]
 pub struct Job {
     /// Path relative to the library root, shown in progress output.
     pub rel: PathBuf,
@@ -129,8 +128,8 @@ pub fn remove_empty_dirs(root: &Path) {
         let mut empty = true;
         for entry in entries.flatten() {
             let path = entry.path();
-            let gone = path.is_dir() && !path.is_symlink() && prune(&path) && fs::remove_dir(&path).is_ok();
-            empty &= gone;
+            let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+            empty &= is_dir && prune(&path) && fs::remove_dir(&path).is_ok();
         }
         empty
     }
