@@ -9,6 +9,7 @@ use crate::encode::{self, OggOpusWriter, RATE};
 use crate::loudness::{self, Gain};
 use crate::resample::Resampler;
 use crate::scan::Job;
+use lofty::ogg::tag::VorbisComments;
 
 pub type Result<T> = encode::Result<T>;
 
@@ -24,6 +25,10 @@ pub struct Settings {
 pub fn transcode(job: &Job, settings: &Settings) -> Result<()> {
     let (src, dst) = (&job.src, &job.dst);
     let mut reader = AudioReader::open(src)?;
+    let tags = encode::read_tags(src, settings.keep_art).unwrap_or_else(|e| {
+        eprintln!("warning: {}: tags not copied: {e}", job.rel.display());
+        Default::default()
+    });
     let mut linear = 1.0;
     if settings.normalize {
         let gain = measure(src, settings)?;
@@ -39,14 +44,7 @@ pub fn transcode(job: &Job, settings: &Settings) -> Result<()> {
     // Write next to the destination, rename when complete, so an interrupted
     // run never leaves a truncated file that looks up to date.
     let tmp = dst.with_extension("opus.part");
-    let result = encode_into(&tmp, &mut reader, linear, settings)
-        .and_then(|()| encode::copy_tags(src, &tmp, settings.keep_art))
-        .and_then(|warning| {
-            if let Some(w) = warning {
-                eprintln!("warning: {}: {w}", job.rel.display());
-            }
-            Ok(fs::rename(&tmp, dst)?)
-        });
+    let result = encode_into(&tmp, &mut reader, linear, tags, settings).and_then(|()| Ok(fs::rename(&tmp, dst)?));
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
     }
@@ -62,9 +60,16 @@ fn measure(src: &Path, settings: &Settings) -> Result<Gain> {
     Ok(loudness::gain_to(&meter, settings.loudness_lufs, settings.true_peak_dbtp)?)
 }
 
-fn encode_into(tmp: &Path, reader: &mut AudioReader, linear: f32, settings: &Settings) -> Result<()> {
+fn encode_into(
+    tmp: &Path,
+    reader: &mut AudioReader,
+    linear: f32,
+    tags: VorbisComments,
+    settings: &Settings,
+) -> Result<()> {
     let (rate, channels) = (reader.rate, reader.channels);
-    let mut writer = OggOpusWriter::new(BufWriter::new(File::create(tmp)?), channels, rate, settings.bitrate_kbps)?;
+    let out = BufWriter::new(File::create(tmp)?);
+    let mut writer = OggOpusWriter::new(out, channels, rate, settings.bitrate_kbps, tags)?;
     let mut resampler = (rate != RATE).then(|| Resampler::new(rate, RATE, channels as usize)).transpose()?;
     let mut scaled = Vec::new();
     while let Some(chunk) = reader.next_chunk()? {

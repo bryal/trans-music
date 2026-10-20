@@ -1,4 +1,4 @@
-//! Opus encoding into an Ogg container (RFC 7845), plus tag copying.
+//! Opus encoding into an Ogg container (RFC 7845), and the tags to put in it.
 
 use std::fs::File;
 use std::hash::BuildHasher;
@@ -11,7 +11,7 @@ use lofty::flac::FlacFile;
 use lofty::ogg::tag::VorbisComments;
 use lofty::ogg::{OggPictureStorage, OpusFile, VorbisFile};
 use lofty::probe::Probe;
-use lofty::tag::{Tag, TagExt, TagType};
+use lofty::tag::TagExt;
 use ogg::{PacketWriteEndInfo, PacketWriter};
 use opusic_c::{Application, Bitrate, Channels, Encoder, SampleRate, Signal};
 
@@ -54,13 +54,16 @@ pub struct OggOpusWriter<W: Write> {
 }
 
 impl<W: Write> OggOpusWriter<W> {
-    pub fn new(out: W, channels: Channels, input_rate: u32, bitrate_kbps: u32) -> Result<Self> {
+    pub fn new(out: W, channels: Channels, input_rate: u32, bitrate_kbps: u32, mut tags: VorbisComments) -> Result<Self> {
         let mut enc = new_encoder(channels, bitrate_kbps)?;
         let pre_skip = u16::try_from(opus(enc.get_look_ahead())?)?;
         let serial = std::hash::RandomState::new().hash_one(0u8) as u32;
         let mut ogg = PacketWriter::new(out);
         ogg.write_packet(opus_head(channels as u8, pre_skip, input_rate), serial, PacketWriteEndInfo::EndPage, 0)?;
-        ogg.write_packet(opus_tags(), serial, PacketWriteEndInfo::EndPage, 0)?;
+        tags.set_vendor(VENDOR.to_owned());
+        let mut opus_tags = b"OpusTags".to_vec();
+        tags.dump_to(&mut opus_tags, WriteOptions::default())?;
+        ogg.write_packet(opus_tags, serial, PacketWriteEndInfo::EndPage, 0)?;
         Ok(Self {
             enc,
             ogg,
@@ -116,41 +119,8 @@ impl<W: Write> OggOpusWriter<W> {
 }
 
 fn opus_head(channels: u8, pre_skip: u16, input_rate: u32) -> Vec<u8> {
-    let mut h = Vec::with_capacity(19);
-    h.extend_from_slice(b"OpusHead");
-    h.push(1);
-    h.push(channels);
-    h.extend_from_slice(&pre_skip.to_le_bytes());
-    h.extend_from_slice(&input_rate.to_le_bytes());
-    h.extend_from_slice(&0i16.to_le_bytes()); // output gain
-    h.push(0); // channel mapping family: mono/stereo
-    h
-}
-
-/// Vendor-only comment header; real tags are written by `copy_tags` afterwards.
-fn opus_tags() -> Vec<u8> {
-    let mut t = Vec::new();
-    t.extend_from_slice(b"OpusTags");
-    t.extend_from_slice(&(VENDOR.len() as u32).to_le_bytes());
-    t.extend_from_slice(VENDOR.as_bytes());
-    t.extend_from_slice(&0u32.to_le_bytes());
-    t
-}
-
-/// Copy `src`'s tags onto the finished Opus file `dst`. ReplayGain tags are
-/// dropped since the audio is already normalized. Unreadable source tags
-/// are reported as a warning rather than an error: the audio is still good.
-pub fn copy_tags(src: &Path, dst: &Path, keep_art: bool) -> Result<Option<String>> {
-    let comments = match read_comments(src, keep_art) {
-        Ok(c) => c,
-        Err(e) => return Ok(Some(format!("tags not copied: {e}"))),
-    };
-    if comments.items().len() == 0 && comments.pictures().is_empty() {
-        return Ok(None);
-    }
-    let mut file = File::options().read(true).write(true).open(dst)?;
-    comments.save_to(&mut file, WriteOptions::default())?;
-    Ok(None)
+    let mapping_family_and_gain = [0, 0, 0];
+    [b"OpusHead", &[1, channels][..], &pre_skip.to_le_bytes(), &input_rate.to_le_bytes(), &mapping_family_and_gain].concat()
 }
 
 const GAIN_TAGS: [&str; 6] = [
@@ -162,47 +132,34 @@ const GAIN_TAGS: [&str; 6] = [
     "R128_ALBUM_GAIN",
 ];
 
-/// Sources that already carry Vorbis comments are copied field for field;
-/// everything else goes through lofty's generic mapping, which drops
-/// fields it has no name for.
-fn read_comments(src: &Path, keep_art: bool) -> std::result::Result<VorbisComments, lofty::error::FileParseError> {
+/// The tags of `src` as Vorbis comments, minus ReplayGain and R128 gains.
+/// FLAC and Ogg sources are copied field for field; other formats go
+/// through lofty's generic mapping, which drops fields it has no name for.
+pub fn read_tags(src: &Path, keep_art: bool) -> Result<VorbisComments> {
     let probe = Probe::open(src)?.guess_file_type()?;
-    let mut comments = match probe.file_type() {
-        Some(FileType::Flac) => FlacFile::read_from(&mut File::open(src)?, ParseOptions::default())?
-            .vorbis_comments()
-            .cloned()
-            .unwrap_or_default(),
-        Some(FileType::Opus) => OpusFile::read_from(&mut File::open(src)?, ParseOptions::default())?
-            .vorbis_comments()
-            .clone(),
-        Some(FileType::Vorbis) => VorbisFile::read_from(&mut File::open(src)?, ParseOptions::default())?
-            .vorbis_comments()
-            .clone(),
+    let mut tags = match probe.file_type() {
+        Some(FileType::Flac) => {
+            let flac = FlacFile::read_from(&mut File::open(src)?, ParseOptions::default())?;
+            let mut tags = flac.vorbis_comments().cloned().unwrap_or_default();
+            for (picture, info) in flac.pictures() {
+                tags.insert_picture(picture.clone(), Some(*info))?;
+            }
+            tags
+        }
+        Some(FileType::Opus) => OpusFile::read_from(&mut File::open(src)?, ParseOptions::default())?.vorbis_comments().clone(),
+        Some(FileType::Vorbis) => {
+            VorbisFile::read_from(&mut File::open(src)?, ParseOptions::default())?.vorbis_comments().clone()
+        }
         _ => {
             let tagged = probe.read()?;
-            let mut tag = Tag::new(TagType::VorbisComments);
-            // Merge every tag found (ID3v2 + ID3v1 + APE, say); earlier ones win.
-            for t in tagged.tags() {
-                for item in t.items() {
-                    if tag.get(item.key()).is_none() {
-                        tag.insert(item.clone());
-                    }
-                }
-                for p in t.pictures() {
-                    if !tag.pictures().iter().any(|q| q.data() == p.data()) {
-                        tag.push_picture(p.clone());
-                    }
-                }
-            }
-            VorbisComments::from(tag)
+            tagged.primary_tag().or(tagged.first_tag()).cloned().map(VorbisComments::from).unwrap_or_default()
         }
     };
     for key in GAIN_TAGS {
-        comments.remove(key).for_each(drop);
+        tags.remove(key).for_each(drop);
     }
     if !keep_art {
-        comments.remove_pictures();
+        tags.remove_pictures();
     }
-    comments.set_vendor(VENDOR.to_owned());
-    Ok(comments)
+    Ok(tags)
 }
