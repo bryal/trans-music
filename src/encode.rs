@@ -130,15 +130,19 @@ fn opus_tags() -> Vec<u8> {
 }
 
 /// Copy `src`'s tags onto the finished Opus file `dst`. ReplayGain tags are
-/// dropped since the audio is already normalized.
-pub fn copy_tags(src: &Path, dst: &Path, keep_art: bool) -> Result<()> {
-    let comments = read_comments(src, keep_art).map_err(|e| format!("reading tags: {e}"))?;
+/// dropped since the audio is already normalized. Unreadable source tags
+/// are reported as a warning rather than an error: the audio is still good.
+pub fn copy_tags(src: &Path, dst: &Path, keep_art: bool) -> Result<Option<String>> {
+    let comments = match read_comments(src, keep_art) {
+        Ok(c) => c,
+        Err(e) => return Ok(Some(format!("tags not copied: {e}"))),
+    };
     if comments.items().len() == 0 && comments.pictures().is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let mut file = File::options().read(true).write(true).open(dst)?;
     comments.save_to(&mut file, WriteOptions::default())?;
-    Ok(())
+    Ok(None)
 }
 
 const GAIN_TAGS: [&str; 6] = [

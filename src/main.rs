@@ -81,8 +81,8 @@ fn main() {
                     }
                     match transcode::transcode(&job.src, &job.dst, &settings) {
                         Ok(report) => {
-                            if let Some(e) = report.tag_error {
-                                eprintln!("warning: {}: {e}", job.rel.display());
+                            if let Some(w) = report.warning {
+                                eprintln!("warning: {}: {w}", job.rel.display());
                             }
                             if let Some(g) = report.gain {
                                 if g.limited {

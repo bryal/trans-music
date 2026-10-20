@@ -25,7 +25,7 @@ pub struct Target {
 
 pub struct Report {
     pub gain: Option<Gain>,
-    pub tag_error: Option<String>,
+    pub warning: Option<String>,
 }
 
 pub fn transcode(src: &Path, dst: &Path, settings: &Settings) -> Result<Report> {
@@ -43,14 +43,16 @@ pub fn transcode(src: &Path, dst: &Path, settings: &Settings) -> Result<Report> 
     // Write next to the destination, rename when complete, so an interrupted
     // run never leaves a truncated file that looks up to date.
     let tmp = dst.with_extension("opus.part");
-    let result = encode_into(&tmp, &mut reader, rate, channels, linear, settings);
-    if let Err(e) = result {
-        let _ = fs::remove_file(&tmp);
-        return Err(e);
+    let result = encode_into(&tmp, &mut reader, rate, channels, linear, settings)
+        .and_then(|()| encode::copy_tags(src, &tmp, settings.keep_art))
+        .and_then(|warning| fs::rename(&tmp, dst).map(|()| warning).map_err(Into::into));
+    match result {
+        Ok(warning) => Ok(Report { gain, warning }),
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
     }
-    let tag_error = encode::copy_tags(src, &tmp, settings.keep_art).err().map(|e| e.to_string());
-    fs::rename(&tmp, dst)?;
-    Ok(Report { gain, tag_error })
 }
 
 fn measure(src: &Path, target: Target) -> Result<Gain> {
@@ -136,7 +138,7 @@ mod tests {
         };
         let report = transcode(&src, &dst, &settings).unwrap();
         assert!(report.gain.unwrap().db > 0.0);
-        assert_eq!(report.tag_error, None);
+        assert_eq!(report.warning, None);
 
         let mut reader = AudioReader::open(&dst).unwrap();
         assert_eq!((reader.rate, reader.channels), (RATE, 2));

@@ -39,8 +39,16 @@ pub fn plan(src_root: &Path, dst_root: &Path, force: bool) -> io::Result<Plan> {
     let mut todo = Vec::new();
     let mut conflicts = Vec::new();
     let mut expected: BTreeSet<PathBuf> = BTreeSet::new();
+    // A destination inside the source must not be scanned as input.
+    let dst_in_src = fs::canonicalize(dst_root)
+        .ok()
+        .zip(fs::canonicalize(src_root).ok())
+        .and_then(|(d, s)| d.strip_prefix(s).ok().map(Path::to_path_buf));
 
     for rel in walk(src_root)? {
+        if dst_in_src.as_ref().is_some_and(|d| rel.starts_with(d)) {
+            continue;
+        }
         let ext = extension(&rel);
         all_exts.insert(ext.clone());
         if !AUDIO_EXTS.contains(&ext.as_str()) {
