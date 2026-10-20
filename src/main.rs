@@ -52,17 +52,30 @@ mod flags {
     }
 }
 
-fn main() {
+/// Parses and checks the command line. On bad usage, prints the problem and
+/// the help text and exits.
+fn parse_args() -> flags::TransMusic {
     // Checked before parsing so it works without the required arguments.
     if std::env::args().skip(1).any(|a| a == "-V" || a == "--version") {
         println!("trans-music {}", env!("CARGO_PKG_VERSION"));
         exit(0)
     }
-    let opts = flags::TransMusic::from_env_or_exit();
-    if !(6..=510).contains(&opts.bitrate) {
-        eprintln!("error: --bitrate is in kbit/s and must be between 6 and 510");
+    let parsed = flags::TransMusic::from_env().and_then(|opts| match opts.bitrate {
+        6..=510 => Ok(opts),
+        _ => Err(xflags::Error::new("--bitrate is in kbit/s and must be between 6 and 510")),
+    });
+    parsed.unwrap_or_else(|err| {
+        if err.is_help() {
+            err.exit()
+        }
+        let help = flags::TransMusic::from_vec(vec!["--help".into()]).unwrap_err();
+        eprintln!("error: {err}\n\n{help}");
         exit(2)
-    }
+    })
+}
+
+fn main() {
+    let opts = parse_args();
     let settings = Settings {
         src: opts.src,
         dst: opts.dst,
