@@ -34,6 +34,11 @@ pub struct Plan {
 }
 
 pub fn plan(src_root: &Path, dst_root: &Path, force: bool) -> io::Result<Plan> {
+    if let (Ok(s), Ok(d)) = (fs::canonicalize(src_root), fs::canonicalize(dst_root)) {
+        if s == d {
+            return Err(io::Error::other("SRC and DST are the same directory"));
+        }
+    }
     let mut all_exts = BTreeSet::new();
     let mut skipped = Vec::new();
     let mut todo = Vec::new();
@@ -45,7 +50,7 @@ pub fn plan(src_root: &Path, dst_root: &Path, force: bool) -> io::Result<Plan> {
         .zip(fs::canonicalize(src_root).ok())
         .and_then(|(d, s)| d.strip_prefix(s).ok().map(Path::to_path_buf));
 
-    for rel in walk(src_root)? {
+    for rel in walk(src_root, true)? {
         if dst_in_src.as_ref().is_some_and(|d| rel.starts_with(d)) {
             continue;
         }
@@ -65,7 +70,8 @@ pub fn plan(src_root: &Path, dst_root: &Path, force: bool) -> io::Result<Plan> {
         }
     }
 
-    let orphans = match walk(dst_root) {
+    // Never follow links in DST: pruning must not reach outside it.
+    let orphans = match walk(dst_root, false) {
         Ok(rels) => rels
             .into_iter()
             .map(|r| dst_root.join(r))
@@ -78,15 +84,13 @@ pub fn plan(src_root: &Path, dst_root: &Path, force: bool) -> io::Result<Plan> {
     Ok(Plan { all_exts, skipped, todo, orphans, conflicts })
 }
 
-/// Transcode when the output is missing or older than the source.
+/// Transcode when the output is missing or older than the source. An
+/// unreadable source is attempted so that the error gets reported.
 fn needs_transcode(job: &Job) -> bool {
-    let Ok(dst_meta) = fs::metadata(&job.dst) else {
+    let Ok(dst_time) = fs::metadata(&job.dst).and_then(|m| m.modified()) else {
         return true;
     };
-    match (fs::metadata(&job.src).and_then(|m| m.modified()), dst_meta.modified()) {
-        (Ok(src_time), Ok(dst_time)) => dst_time < src_time,
-        _ => false,
-    }
+    fs::metadata(&job.src).and_then(|m| m.modified()).ok().is_none_or(|src_time| dst_time < src_time)
 }
 
 fn extension(path: &Path) -> String {
@@ -96,18 +100,24 @@ fn extension(path: &Path) -> String {
 }
 
 /// All regular files under `root`, as paths relative to `root`, sorted.
-pub fn walk(root: &Path) -> io::Result<Vec<PathBuf>> {
+/// With `follow_links`, symlinked directories are entered once each, so a
+/// link to an ancestor cannot loop.
+pub fn walk(root: &Path, follow_links: bool) -> io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
     let mut stack = vec![PathBuf::new()];
     while let Some(rel_dir) = stack.pop() {
-        for entry in fs::read_dir(root.join(&rel_dir))? {
+        let dir = root.join(&rel_dir);
+        if !seen.insert(fs::canonicalize(&dir)?) {
+            continue;
+        }
+        for entry in fs::read_dir(&dir)? {
             let entry = entry?;
             let rel = rel_dir.join(entry.file_name());
             let kind = entry.file_type()?;
-            // Follow symlinked directories, like the legacy tool did.
-            if kind.is_dir() || (kind.is_symlink() && root.join(&rel).is_dir()) {
+            if kind.is_dir() || (follow_links && kind.is_symlink() && root.join(&rel).is_dir()) {
                 stack.push(rel);
-            } else {
+            } else if !kind.is_symlink() || follow_links {
                 out.push(rel);
             }
         }

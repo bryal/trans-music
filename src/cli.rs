@@ -24,7 +24,7 @@ Options:
   -n, --dry-run            List what would be done, change nothing
       --prune              Delete files in DST with no counterpart in SRC
       --strip-art          Do not copy embedded cover art
-  -q, --quiet              Only report errors
+  -q, --quiet              Only report errors and warnings
   -v, --verbose            Report every file, including skipped ones
   -h, --help               Show this help
   -V, --version            Show version
@@ -106,8 +106,8 @@ fn try_parse() -> Result<Opts, lexopt::Error> {
     let [src, dst]: [PathBuf; 2] = positional
         .try_into()
         .map_err(|_| lexopt::Error::from("expected exactly two paths: <SRC> <DST>"))?;
-    if bitrate_kbps == 0 {
-        return Err("--bitrate must be positive".into());
+    if !(6..=510).contains(&bitrate_kbps) {
+        return Err("--bitrate must be between 6 and 510 kbit/s".into());
     }
     if jobs == 0 {
         return Err("--jobs must be positive".into());
