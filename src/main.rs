@@ -34,8 +34,8 @@ mod flags {
             optional -p,--true-peak dbtp: f64
             /// Skip loudness normalization
             optional -N,--no-normalize
-            /// Files transcoded in parallel [default: CPU count]
-            optional -j,--jobs n: NonZeroUsize
+            /// Worker threads, each transcoding one file at a time [default: CPU count]
+            optional -t,--threads n: NonZeroUsize
             /// Re-transcode even if the output is up to date
             optional -f,--force
             /// List what would be done, change nothing
@@ -107,14 +107,14 @@ fn main() {
         true_peak_dbtp: opts.true_peak.unwrap_or(-2.0),
         keep_art: !opts.strip_art,
     };
-    let jobs = opts.jobs.or(std::thread::available_parallelism().ok()).map_or(1, NonZeroUsize::get);
+    let threads = opts.threads.or(std::thread::available_parallelism().ok()).map_or(1, NonZeroUsize::get);
     let total = plan.todo.len();
     let next = AtomicUsize::new(0);
     let failures = AtomicUsize::new(0);
     let started = Instant::now();
 
     std::thread::scope(|scope| {
-        for _ in 0..jobs.min(total) {
+        for _ in 0..threads.min(total) {
             scope.spawn(|| {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);

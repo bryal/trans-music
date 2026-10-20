@@ -12,7 +12,7 @@ trans-music [OPTIONS] <SRC> <DST>
 Every audio file under `SRC` becomes `DST/<same path>.opus`. Files whose
 output already exists and is newer than the source are skipped, so reruns
 only pick up new or changed tracks. See `trans-music --help` for options:
-bitrate (required), loudness target, true-peak ceiling, job count, `--prune`,
+bitrate (required), loudness target, true-peak ceiling, thread count, `--prune`,
 `--strip-art`, `--dry-run`, `--force`.
 
 ## What it does to each file
