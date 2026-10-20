@@ -52,12 +52,22 @@ mod flags {
     }
 }
 
+const VERSION: &str = concat!(
+    "trans-music ",
+    env!("CARGO_PKG_VERSION"),
+    "\nCopyright (C) 2026 ",
+    env!("CARGO_PKG_AUTHORS"),
+    "\nLicense GPLv3: GNU GPL version 3 <https://gnu.org/licenses/gpl.html>.",
+    "\nThis is free software: you are free to change and redistribute it.",
+    "\nThere is NO WARRANTY, to the extent permitted by law.",
+);
+
 /// Parses and checks the command line. On bad usage, prints the problem and
 /// the help text and exits.
 fn parse_args() -> flags::TransMusic {
     // Checked before parsing so it works without the required arguments.
     if std::env::args().skip(1).any(|a| a == "-V" || a == "--version") {
-        println!("trans-music {}", env!("CARGO_PKG_VERSION"));
+        println!("{VERSION}");
         exit(0)
     }
     let parsed = flags::TransMusic::from_env().and_then(|opts| match opts.bitrate {
