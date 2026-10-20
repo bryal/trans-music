@@ -63,9 +63,10 @@ fn main() {
         src: opts.src,
         dst: opts.dst,
         bitrate_kbps: opts.bitrate,
-        normalize: !opts.no_normalize,
-        loudness_lufs: opts.loudness.unwrap_or(-16.0),
-        true_peak_dbtp: opts.true_peak.unwrap_or(-2.0),
+        normalize: (!opts.no_normalize).then(|| loudness::Target {
+            integrated_lufs: opts.loudness.unwrap_or(-16.0),
+            true_peak_dbtp: opts.true_peak.unwrap_or(-2.0),
+        }),
         keep_art: !opts.strip_art,
     };
     let plan = match scan::plan(&settings, opts.force) {

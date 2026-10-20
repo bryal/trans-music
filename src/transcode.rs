@@ -18,9 +18,8 @@ pub struct Settings {
     /// Mirror root, see [`Settings::output`].
     pub dst: PathBuf,
     pub bitrate_kbps: u32,
-    pub normalize: bool,
-    pub loudness_lufs: f64,
-    pub true_peak_dbtp: f64,
+    /// `None` leaves the level alone.
+    pub normalize: Option<loudness::Target>,
     pub keep_art: bool,
 }
 
@@ -40,14 +39,16 @@ pub fn transcode(job: &Path, settings: &Settings) -> Result<()> {
         eprintln!("warning: {}: tags not copied: {e}", job.display());
         Default::default()
     });
-    let mut linear = 1.0;
-    if settings.normalize {
-        let gain = measure(&src, settings)?;
-        if gain.limited {
-            eprintln!("warning: {}: gain capped at {:+.1} dB by the true-peak ceiling", job.display(), gain.db);
+    let linear = match &settings.normalize {
+        None => 1.0,
+        Some(target) => {
+            let gain = measure(&src, target)?;
+            if gain.limited {
+                eprintln!("warning: {}: gain capped at {:+.1} dB by the true-peak ceiling", job.display(), gain.db);
+            }
+            gain.linear()
         }
-        linear = gain.linear();
-    }
+    };
 
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)?;
@@ -62,13 +63,13 @@ pub fn transcode(job: &Path, settings: &Settings) -> Result<()> {
     result
 }
 
-fn measure(src: &Path, settings: &Settings) -> Result<Gain> {
+fn measure(src: &Path, target: &loudness::Target) -> Result<Gain> {
     let mut reader = AudioReader::open(src)?;
     let mut meter = loudness::meter(reader.channels as usize, reader.rate)?;
     while let Some(chunk) = reader.next_chunk()? {
         meter.add_frames_f32(chunk)?;
     }
-    Ok(loudness::gain_to(&meter, settings.loudness_lufs, settings.true_peak_dbtp)?)
+    Ok(loudness::gain_to(&meter, target)?)
 }
 
 fn encode_into(tmp: &Path, reader: &mut AudioReader, linear: f32, tags: VorbisComments, settings: &Settings) -> Result<()> {
@@ -132,9 +133,7 @@ mod tests {
             src: dir.clone(),
             dst: dir.join("out"),
             bitrate_kbps: 96,
-            normalize: true,
-            loudness_lufs: -16.0,
-            true_peak_dbtp: -2.0,
+            normalize: Some(loudness::Target { integrated_lufs: -16.0, true_peak_dbtp: -2.0 }),
             keep_art: true,
         };
         let job = Path::new("tone.wav");
@@ -154,7 +153,8 @@ mod tests {
         assert_eq!(out.len() / 2, expected);
         let lead_peak = out[..2 * 47_000].iter().fold(0f32, |m, v| m.max(v.abs()));
         assert!(lead_peak < 0.01, "leading silence peak {lead_peak}");
-        let off_by = loudness::gain_to(&meter, -16.0, f64::INFINITY).unwrap().db;
+        let unlimited = loudness::Target { integrated_lufs: -16.0, true_peak_dbtp: f64::INFINITY };
+        let off_by = loudness::gain_to(&meter, &unlimited).unwrap().db;
         assert!(off_by.abs() < 0.5, "{off_by} dB off -16 LUFS");
         fs::remove_dir_all(&dir).unwrap();
     }

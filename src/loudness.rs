@@ -12,9 +12,17 @@ pub fn meter(channels: usize, rate: u32) -> Result<EbuR128, ebur128::Error> {
     Ok(ebu)
 }
 
-/// The gain that brings the audio measured by `ebu` to `target_lufs`
-/// without its true peak exceeding `ceiling_dbtp`. Silence gets unity gain.
-pub fn gain_to(ebu: &EbuR128, target_lufs: f64, ceiling_dbtp: f64) -> Result<Gain, ebur128::Error> {
+/// What loudness normalization aims for.
+#[derive(Debug, Clone, Copy)]
+pub struct Target {
+    pub integrated_lufs: f64,
+    /// Ceiling for the true peak; it wins over `integrated_lufs`.
+    pub true_peak_dbtp: f64,
+}
+
+/// The gain that brings the audio measured by `ebu` to `target`. Silence
+/// gets unity gain.
+pub fn gain_to(ebu: &EbuR128, target: &Target) -> Result<Gain, ebur128::Error> {
     let lufs = ebu.loudness_global()?;
     if !lufs.is_finite() {
         return Ok(Gain { db: 0.0, limited: false });
@@ -23,8 +31,8 @@ pub fn gain_to(ebu: &EbuR128, target_lufs: f64, ceiling_dbtp: f64) -> Result<Gai
     for ch in 0..ebu.channels() {
         peak = peak.max(ebu.true_peak(ch)?);
     }
-    let wanted = target_lufs - lufs;
-    let max = ceiling_dbtp - 20.0 * peak.log10();
+    let wanted = target.integrated_lufs - lufs;
+    let max = target.true_peak_dbtp - 20.0 * peak.log10();
     Ok(Gain { db: wanted.min(max), limited: wanted > max })
 }
 
