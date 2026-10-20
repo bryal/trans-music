@@ -72,8 +72,9 @@ fn needs_transcode(src: &Path, dst: &Path) -> bool {
 
 /// All files under `root`, as paths relative to `root`, sorted, leaving out
 /// the directory whose canonical path is `skip`. With `follow_links`,
-/// symlinked directories are entered once each, so a link to an ancestor
-/// cannot loop.
+/// symlinked directories are followed. A directory reachable by several
+/// paths is entered once, by the first in sorted order, so a link to an
+/// ancestor cannot loop.
 fn walk(root: &Path, follow_links: bool, skip: Option<&Path>) -> io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
@@ -84,8 +85,10 @@ fn walk(root: &Path, follow_links: bool, skip: Option<&Path>) -> io::Result<Vec<
         if Some(canon.as_path()) == skip || !seen.insert(canon) {
             continue;
         }
-        for entry in fs::read_dir(&dir)? {
-            let entry = entry?;
+        let mut entries = fs::read_dir(&dir)?.collect::<io::Result<Vec<_>>>()?;
+        // Reversed, so the stack pops subdirectories in sorted order.
+        entries.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+        for entry in entries {
             let rel = rel_dir.join(entry.file_name());
             let kind = entry.file_type()?;
             if kind.is_dir() || (follow_links && kind.is_symlink() && root.join(&rel).is_dir()) {
