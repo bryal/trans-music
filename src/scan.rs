@@ -35,9 +35,6 @@ pub struct Plan {
 pub fn plan(src_root: &Path, dst_root: &Path, force: bool) -> io::Result<Plan> {
     let src_canon = fs::canonicalize(src_root)?;
     let dst_canon = fs::canonicalize(dst_root).ok();
-    if dst_canon.as_ref() == Some(&src_canon) {
-        return Err(io::Error::other("SRC and DST are the same directory"));
-    }
     let mut all_exts = BTreeSet::new();
     let mut skipped = Vec::new();
     let mut todo = Vec::new();

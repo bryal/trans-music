@@ -44,17 +44,12 @@ mod flags {
 
 pub use flags::TransMusic;
 
-/// Parses the command line. Exits with a message on bad usage.
+/// Parses the command line, exiting with a message on bad usage.
 pub fn parse() -> TransMusic {
     // Checked before parsing so it works without the required arguments.
-    if std::env::args_os().skip(1).any(|a| a == "-V" || a == "--version") {
+    if std::env::args().skip(1).any(|a| a == "-V" || a == "--version") {
         println!("trans-music {}", env!("CARGO_PKG_VERSION"));
         exit(0)
     }
-    let flags = TransMusic::from_env_or_exit();
-    if !(6..=510).contains(&flags.bitrate) {
-        eprintln!("error: --bitrate must be between 6 and 510 kbit/s");
-        exit(2)
-    }
-    flags
+    TransMusic::from_env_or_exit()
 }
