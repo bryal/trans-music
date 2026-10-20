@@ -9,6 +9,7 @@ symphonia = { version = "0.6", default-features = false, features = ["aac", "ala
 symphonia-core = "0.6"
 opuscule = "0.2"
 ebur128 = "0.1"
+rubato = "5"
 
 [profile.release]
 lto = true

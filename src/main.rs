@@ -1,6 +1,7 @@
 mod cli;
 mod decode;
 mod loudness;
+mod resample;
 mod scan;
 
 use std::process::exit;
