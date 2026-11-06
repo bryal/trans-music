@@ -40,7 +40,7 @@ mod flags {
             optional -f,--force
             /// List what would be done, change nothing
             optional -n,--dry-run
-            /// Delete files in <dst> with no counterpart in <src>
+            /// Delete audio and image files in <dst> with no counterpart in <src>
             optional --prune
             /// Do not copy embedded cover art
             optional --strip-art
@@ -171,9 +171,15 @@ fn main() {
             if let Err(e) = std::fs::remove_file(p) {
                 eprintln!("error: removing {p:?}: {e}");
                 ok = false;
+                continue;
+            }
+            // Remove the directories this left empty, but not `dst` itself.
+            for dir in p.ancestors().skip(1).take_while(|dir| *dir != settings.dst) {
+                if std::fs::remove_dir(dir).is_err() {
+                    break;
+                }
             }
         }
-        scan::remove_empty_dirs(&settings.dst);
     }
     if !quiet {
         println!("done: {} transcoded, {} failed, {:.0?}", total - failures, failures, started.elapsed());

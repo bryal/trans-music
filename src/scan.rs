@@ -11,6 +11,9 @@ use crate::transcode::Settings;
 /// Extensions (lower case, without dot) treated as audio input.
 pub const AUDIO_EXTS: &[&str] = &["flac", "m4a", "mp4", "mp3", "ogg", "oga", "opus", "wav", "wave", "aac", "alac", "mka"];
 
+/// Extensions of the cover images that other tools copy into `dst`.
+const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp"];
+
 /// Each audio file under `src` is a job, named by its path relative to `src`.
 pub struct Plan {
     /// Every extension seen under `src`.
@@ -18,7 +21,8 @@ pub struct Plan {
     /// Jobs whose output is up to date.
     pub skipped: Vec<PathBuf>,
     pub todo: Vec<PathBuf>,
-    /// Files under `dst` that are no job's output.
+    /// Audio and image files under `dst` that are neither a job's output nor
+    /// at the path of an image under `src`. Nothing else there is ours to delete.
     pub orphans: Vec<PathBuf>,
     /// Jobs left out because an earlier job has the same output, e.g.
     /// `x.flac` next to `x.mp3`.
@@ -37,30 +41,45 @@ pub fn plan(settings: &Settings, force: bool) -> io::Result<Plan> {
 
     // Each walk skips the other root: a DST inside SRC is not read as input,
     // and a SRC inside DST is not pruned.
-    for job in walk(src_root, true, dst_canon.as_deref())? {
-        let ext = job.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    for rel in walk(src_root, true, dst_canon.as_deref())? {
+        let ext = extension(&rel);
         all_exts.insert(ext.clone());
+        if IMAGE_EXTS.contains(&ext.as_str()) {
+            expected.insert(dst_root.join(&rel));
+        }
         if !AUDIO_EXTS.contains(&ext.as_str()) {
             continue;
         }
-        let dst = settings.output(&job);
+        let dst = settings.output(&rel);
         if !expected.insert(dst.clone()) {
-            conflicts.push(job);
-        } else if force || needs_transcode(&src_root.join(&job), &dst) {
-            todo.push(job);
+            conflicts.push(rel);
+        } else if force || needs_transcode(&src_root.join(&rel), &dst) {
+            todo.push(rel);
         } else {
-            skipped.push(job);
+            skipped.push(rel);
         }
     }
 
     // Never follow links in DST: pruning must not reach outside it.
     let orphans = match walk(dst_root, false, Some(&src_canon)) {
-        Ok(rels) => rels.into_iter().map(|r| dst_root.join(r)).filter(|p| !expected.contains(p)).collect(),
+        Ok(rels) => rels
+            .into_iter()
+            .filter(|r| {
+                let ext = extension(r);
+                AUDIO_EXTS.contains(&ext.as_str()) || IMAGE_EXTS.contains(&ext.as_str())
+            })
+            .map(|r| dst_root.join(r))
+            .filter(|p| !expected.contains(p))
+            .collect(),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(e),
     };
 
     Ok(Plan { all_exts, skipped, todo, orphans, conflicts })
+}
+
+fn extension(path: &Path) -> String {
+    path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default()
 }
 
 /// True unless the output exists and is at least as new as the source.
@@ -101,19 +120,4 @@ fn walk(root: &Path, follow_links: bool, skip: Option<&Path>) -> io::Result<Vec<
     }
     out.sort();
     Ok(out)
-}
-
-/// Remove directories under `root` left empty by pruning; `root` itself stays.
-pub fn remove_empty_dirs(root: &Path) {
-    fn prune(dir: &Path) -> bool {
-        let Ok(entries) = fs::read_dir(dir) else { return false };
-        let mut empty = true;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
-            empty &= is_dir && prune(&path) && fs::remove_dir(&path).is_ok();
-        }
-        empty
-    }
-    prune(root);
 }
