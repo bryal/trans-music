@@ -1,6 +1,6 @@
 [package]
 name = "trans-music"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Mirror a music library as loudness-normalized Opus."
 authors = ["Jojo <jo@jo.zone>"]
